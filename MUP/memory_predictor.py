@@ -25,3 +25,19 @@ FEATURE_COLS = [
 ]
 TARGET_COL = "label"
 PROJECT_COL = "project_id"
+
+# Validate schema
+missing = [c for c in FEATURE_COLS + [TARGET_COL, PROJECT_COL] if c not in df.columns]
+if missing:
+    raise ValueError(f"Missing columns from component1.csv: {missing}")
+
+# Remove NaN rows
+df = df.dropna(subset=FEATURE_COLS + [TARGET_COL])
+
+# Encode label: FAILURE=1, NORMAL=0
+df["label_encoded"] = (df[TARGET_COL] == "FAILURE").astype(int)
+
+print(f"  Total rows loaded : {len(df)}")
+print(f"  Projects found    : {sorted(df[PROJECT_COL].unique())}")
+print(f"  Class distribution:\n{df[TARGET_COL].value_counts().to_string()}")
+print(f"  NaN rows dropped  : {df.isnull().sum().sum()}")
