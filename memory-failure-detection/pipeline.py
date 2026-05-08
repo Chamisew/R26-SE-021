@@ -620,3 +620,79 @@ def stage1_collect_live(duration_minutes: int = 10) -> pd.DataFrame:
         pipeline_state["last_updated"] = datetime.now()
     return df
 
+
+# =============================================================================
+# STAGE 1.5 — PREPROCESSING
+# =============================================================================
+def stage1_5_preprocess(df):
+    """
+    Clean raw rows before Drain3 parsing:
+      1) drop duplicate rows by (timestamp, service_name, log_message)
+      2) forward-fill numeric metrics per service
+      3) remove null/empty log_message rows
+      4) clip out-of-range numeric outliers
+      5) strip special characters from log_message
+    """
+    print("\n" + "="*60)
+    print("STAGE 1.5 — PREPROCESSING")
+    print("="*60)
+
+    try:
+        rows_before = len(df)
+        cleaned = df.copy()
+
+        # 1) Drop duplicates by key columns
+        cleaned = cleaned.drop_duplicates(
+            subset=["timestamp", "service_name", "log_message"],
+            keep="first"
+        ).reset_index(drop=True)
+
+        # 2) Forward-fill numeric columns per service
+        numeric_cols = ["ram_percent", "cpu_percent", "heap_mb_used", "gc_count"]
+        nulls_before_fill = int(cleaned[numeric_cols].isna().sum().sum())
+        cleaned[numeric_cols] = (
+            cleaned.groupby("service_name", sort=False)[numeric_cols]
+                   .transform(lambda col: col.ffill())
+        )
+        nulls_after_fill = int(cleaned[numeric_cols].isna().sum().sum())
+        nulls_filled = nulls_before_fill - nulls_after_fill
+
+        # 3) Remove rows where log_message is null/empty
+        log_series = cleaned["log_message"]
+        invalid_log_mask = log_series.isna() | log_series.astype(str).str.strip().eq("")
+        cleaned = cleaned.loc[~invalid_log_mask].reset_index(drop=True)
+
+        # 4) Clip numeric outliers
+        clip_specs = {
+            "ram_percent": (0, 100),
+            "cpu_percent": (0, 100),
+            "heap_mb_used": (0, 10000),
+        }
+        outliers_clipped = 0
+        for col, (low, high) in clip_specs.items():
+            original = cleaned[col].copy()
+            cleaned[col] = cleaned[col].clip(lower=low, upper=high)
+            outliers_clipped += int((original != cleaned[col]).sum())
+
+        # 5) Strip disallowed special characters from log_message
+        cleaned["log_message"] = (
+            cleaned["log_message"]
+            .astype(str)
+            .str.replace(r"[^A-Za-z0-9 .:\[\]]+", "", regex=True)
+            .str.strip()
+        )
+
+        rows_after = len(cleaned)
+        rows_removed = rows_before - rows_after
+
+        print(f"  Rows before      : {rows_before:,}")
+        print(f"  Rows removed     : {rows_removed:,}")
+        print(f"  Nulls filled     : {nulls_filled:,}")
+        print(f"  Outliers clipped : {outliers_clipped:,}")
+
+        print("\n  [STAGE 1.5 COMPLETE]")
+        return cleaned
+
+    except Exception as exc:
+        print(f"\n  [STAGE 1.5 ERROR] {exc}")
+        raise
