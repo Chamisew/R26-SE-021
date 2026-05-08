@@ -31,3 +31,20 @@ from sklearn.model_selection import train_test_split
 
 warnings.filterwarnings("ignore")
 
+# =============================================================================
+# SHARED PIPELINE STATE (thread-safe)
+# =============================================================================
+pipeline_state_lock = threading.Lock()
+pipeline_state = {
+    "raw_df": None,           # latest raw collected DataFrame
+    "windows_df": None,       # latest windows DataFrame
+    "last_window_id": 0,      # track last saved window_id
+    "status": "stopped",      # "collecting", "processing", "ready"
+    "rows_collected": 0,
+    "windows_generated": 0,
+    "active_services": [],
+    "started_at": None,
+    "last_updated": None,
+    "failure_count": 0,
+    "normal_count": 0,
+}
