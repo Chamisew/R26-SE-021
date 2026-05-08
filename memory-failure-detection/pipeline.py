@@ -1331,3 +1331,183 @@ def add_failure_trends(df):
     df.index = original_index
     return df
 
+
+# =============================================================================
+# STAGE 5 — DATASET CONSTRUCTION AND EXPORT
+# =============================================================================
+def stage5_export(windows_df, config):
+    """
+    Export pipeline_output.csv (full audit trail) and
+    ml_ready_dataset.csv (clean ML features).
+    """
+    print("\n" + "="*60)
+    print("STAGE 5 — DATASET CONSTRUCTION AND EXPORT")
+    print("="*60)
+
+    try:
+        os.makedirs(config["output_dir"], exist_ok=True)
+
+        # -- File 1: pipeline_output.csv --
+        pipeline_cols = [
+            "window_id", "timestamp", "service_name", "stack",
+            "log_template", "template_id",
+            "ram_percent", "cpu_percent", "heap_mb_used", "gc_count",
+            "memory_growth", "heap_rate", "gc_spike_count",
+            "ram_mean", "ram_max", "ram_std",
+            "cpu_mean", "cpu_max", "heap_max",
+            "hybrid_label", "ground_truth_label", "label_source",
+            "detection_layer", "failure_type",
+        ]
+        out1 = os.path.join(config["output_dir"], "pipeline_output.csv")
+        windows_df[pipeline_cols].to_csv(out1, index=False)
+        print(f"  pipeline_output.csv   -> {out1}  ({len(windows_df):,} rows)")
+
+        windows_df = add_failure_trends(windows_df)
+        windows_df = add_ram_std_trend(windows_df)
+
+        # -- File 2: ml_ready_dataset.csv --
+        ml_cols_raw = [
+            "timestamp", "service_name", "window_id",
+            "memory_growth", "heap_rate", "gc_spike_count",
+            "ram_mean", "ram_max", "ram_std",
+            "cpu_mean", "cpu_max", "heap_max",
+            "gc_count", "ram_percent", "heap_mb_used",
+            "failure_type", "hybrid_label",
+            "ram_std_trend",
+            "trend_slope_5m", "trend_max_failures_5m", "trend_variance_5m",
+            "trend_slope_10m", "trend_max_failures_10m", "trend_variance_10m"
+        ]
+        # Add missing columns if any
+        for col in ml_cols_raw:
+            if col not in windows_df.columns:
+                windows_df[col] = np.nan
+
+        ml_df = windows_df[ml_cols_raw].copy()
+        ml_df["project_id"] = windows_df["stack"].apply(get_project_id)
+        ml_df["label"] = ml_df["hybrid_label"]
+        ml_df["failure_type"] = ml_df.apply(lambda row: row["failure_type"] if row["label"] == "FAILURE" else "", axis=1)
+        ml_df["incident_phase_1"] = 0
+        ml_df["incident_phase_2"] = 0
+        ml_df.drop(columns=["hybrid_label"], inplace=True)
+
+        final_ml_cols = [
+            "timestamp", "project_id", "service_name", "window_id",
+            "memory_growth", "heap_rate", "gc_spike_count",
+            "ram_mean", "ram_max", "ram_std", "ram_std_trend",
+            "trend_slope_5m", "trend_max_failures_5m", "trend_variance_5m",
+            "trend_slope_10m", "trend_max_failures_10m", "trend_variance_10m",
+            "heap_max", "gc_count", "ram_percent", "heap_mb_used", 
+            "label", "failure_type", "incident_phase_1", "incident_phase_2"
+        ]
+        ml_df = ml_df[final_ml_cols]
+
+        out2 = os.path.join(config["output_dir"], "ml_ready_dataset.csv")
+        ml_df.to_csv(out2, index=False)
+        print(f"  ml_ready_dataset.csv  -> {out2}  ({len(ml_df):,} rows)")
+
+        print("\n  [STAGE 5 COMPLETE]")
+        return windows_df
+
+    except Exception as exc:
+        print(f"\n  [STAGE 5 ERROR] {exc}")
+        raise
+
+
+# =============================================================================
+# EVALUATION REPORT
+# =============================================================================
+def print_evaluation(windows_df, raw_df):
+    """
+    Print comprehensive evaluation: F1/Precision/Recall, confusion matrix,
+    layer contribution, per-service F1, template stats, dataset stats.
+    """
+    print("\n" + "="*60)
+    print("EVALUATION REPORT")
+    print("="*60)
+
+    y_true = (windows_df["ground_truth_label"] == "FAILURE").astype(int)
+    y_pred = (windows_df["hybrid_label"]        == "FAILURE").astype(int)
+
+    prec  = precision_score(y_true, y_pred, zero_division=0)
+    rec   = recall_score(y_true,    y_pred, zero_division=0)
+    f1    = f1_score(y_true,        y_pred, zero_division=0)
+    cm    = confusion_matrix(y_true, y_pred)
+
+    tn, fp, fn, tp = cm.ravel() if cm.shape == (2, 2) else (0, 0, 0, 0)
+
+    print("\n-- 1. Pipeline Performance vs Ground Truth --")
+    print(f"   Precision : {prec:.4f}")
+    print(f"   Recall    : {rec:.4f}")
+    print(f"   F1 Score  : {f1:.4f}  {'[OK] TARGET MET (>0.80)' if f1 > 0.80 else '[!!] below 0.80 target'}")
+    print(f"\n   Confusion Matrix:")
+    print(f"     TP={tp}  FP={fp}")
+    print(f"     FN={fn}  TN={tn}")
+
+    # -- Layer Contribution --
+    print("\n-- 2. Layer Contribution Analysis --")
+    fail_rows = windows_df[windows_df["hybrid_label"] == "FAILURE"]
+    total_fail = len(fail_rows)
+
+    def _count_layer(keyword):
+        return fail_rows["detection_layer"].str.contains(keyword, na=False).sum()
+
+    kw_count   = _count_layer("keyword")
+    tfidf_count = _count_layer("tfidf_semantic")
+    metric_count = _count_layer("metric_fusion")
+
+    print(f"   Total FAILURE detections : {total_fail}")
+    print(f"   keyword layer            : {kw_count}")
+    print(f"   tfidf_semantic layer     : {tfidf_count}")
+    print(f"   metric_fusion layer      : {metric_count}")
+
+    if total_fail > 0:
+        gain = tfidf_count / total_fail * 100
+    else:
+        gain = 0.0
+    print(f"\n   Semantic Layer Gain      : {gain:.2f}%  "
+          f"{'[OK] TARGET MET (>10%)' if gain > 10 else '[!!] below 10% target'}")
+
+    # -- Per-Service F1 --
+    print("\n-- 3. Per-Service F1 Scores (stack-agnosticism proof) --")
+    print(f"   {'Service':<40} {'F1':>6}  {'Stack'}")
+    print(f"   {'-'*70}")
+    for svc, grp in windows_df.groupby("service_name"):
+        yt = (grp["ground_truth_label"] == "FAILURE").astype(int)
+        yp = (grp["hybrid_label"]        == "FAILURE").astype(int)
+        svc_f1 = f1_score(yt, yp, zero_division=0)
+        stk = grp["stack"].iloc[0]
+        print(f"   {svc:<40} {svc_f1:>6.4f}  {stk}")
+
+    # -- Template Discovery --
+    print("\n-- 4. Template Discovery Summary --")
+    total_tmpl = raw_df["log_template"].nunique()
+    print(f"   Total unique Drain3 templates : {total_tmpl}")
+    print(f"\n   Templates per stack:")
+    stk_tmpl = raw_df.groupby("stack")["log_template"].nunique().sort_values(ascending=False)
+    for stk, cnt in stk_tmpl.items():
+        print(f"     {stk:<30} {cnt} templates")
+
+    # -- Dataset Statistics --
+    print("\n-- 5. Dataset Statistics --")
+    print(f"   Total windows generated : {len(windows_df):,}")
+    wl = windows_df["ground_truth_label"].value_counts()
+    for lbl, cnt in wl.items():
+        print(f"   {lbl:<10}: {cnt:,} ({cnt/len(windows_df)*100:.1f}%)")
+
+    feature_cols = [
+        "memory_growth", "heap_rate", "gc_spike_count",
+        "ram_mean", "ram_max", "ram_std",
+        "cpu_mean", "cpu_max", "heap_max",
+    ]
+    print(f"\n   Feature value ranges (min / mean / max):")
+    print(f"   {'Feature':<20} {'Min':>10}  {'Mean':>10}  {'Max':>10}")
+    print(f"   {'-'*55}")
+    for col in feature_cols:
+        mn  = windows_df[col].min()
+        avg = windows_df[col].mean()
+        mx  = windows_df[col].max()
+        print(f"   {col:<20} {mn:>10.3f}  {avg:>10.3f}  {mx:>10.3f}")
+
+    print("\n" + "="*60)
+    print("EVALUATION COMPLETE")
+    print("="*60)
