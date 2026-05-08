@@ -696,3 +696,82 @@ def stage1_5_preprocess(df):
     except Exception as exc:
         print(f"\n  [STAGE 1.5 ERROR] {exc}")
         raise
+
+# =============================================================================
+# STAGE 2 — DRAIN3 LOG PARSING (stack-agnostic)
+# =============================================================================
+def stage2_drain3_parsing(df, config):
+    """
+    Run Drain3 over ALL log messages together with no per-service config.
+    Adds 'log_template' and 'template_id' columns to df.
+    Persists the Drain3 model state to models/drain3_state.bin.
+    """
+    print("\n" + "="*60)
+    print("STAGE 2 — DRAIN3 LOG PARSING (stack-agnostic)")
+    print("="*60)
+
+    try:
+        from drain3 import TemplateMiner
+        from drain3.template_miner_config import TemplateMinerConfig
+
+        # Build Drain3 config programmatically (no per-service overrides)
+        drain_cfg = TemplateMinerConfig()
+        drain_cfg.drain_depth         = config["drain3_depth"]
+        drain_cfg.drain_sim_th        = config["drain3_sim_thresh"]
+        drain_cfg.drain_max_children  = config["drain3_max_children"]
+        drain_cfg.parametrize_numeric_tokens = True
+
+        # Use a file-based persistence so the model can be saved
+        miner = TemplateMiner(config=drain_cfg)
+
+        templates   = []
+        cluster_ids = []
+
+        print(f"  Processing {len(df):,} log messages …")
+        for i, msg in enumerate(df["log_message"].astype(str), 1):
+            result = miner.add_log_message(msg)
+            templates.append(result["template_mined"])
+            cluster_ids.append(result["cluster_id"])
+            if i % 2000 == 0:
+                print(f"    … {i:,} / {len(df):,} processed")
+
+        df["log_template"] = templates
+        df["template_id"]  = cluster_ids
+
+        # Save Drain3 state
+        os.makedirs(config["models_dir"], exist_ok=True)
+        state_path = os.path.join(config["models_dir"], "drain3_state.bin")
+        with open(state_path, "wb") as f:
+            pickle.dump(miner, f)
+        print(f"\n  Drain3 state saved -> {state_path}")
+
+        # Report
+        unique_templates = df["log_template"].nunique()
+        print(f"\n  Unique templates discovered : {unique_templates}")
+
+        top10 = (
+            df.groupby("log_template")
+              .size()
+              .sort_values(ascending=False)
+              .head(10)
+        )
+        print("\n  Top-10 most frequent templates:")
+        for tmpl, cnt in top10.items():
+            print(f"    [{cnt:>5}]  {tmpl[:90]}")
+
+        # Templates per stack
+        print("\n  Templates per stack:")
+        stack_tmpl = (
+            df.groupby("stack")["log_template"]
+              .nunique()
+              .sort_values(ascending=False)
+        )
+        for stk, cnt in stack_tmpl.items():
+            print(f"    {stk:<30} {cnt} unique templates")
+
+        print("\n  [STAGE 2 COMPLETE]")
+        return df
+
+    except Exception as exc:
+        print(f"\n  [STAGE 2 ERROR] {exc}")
+        raise
