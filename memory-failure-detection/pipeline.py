@@ -67,3 +67,38 @@ CONFIG = {
     "live_duration_minutes"  : -1,
     "live_output_csv"        : "output/live_raw_collection.csv",
 }
+
+# =============================================================================
+# KEYWORD LISTS — memory and CPU failure signals
+# =============================================================================
+MEMORY_KEYWORDS = [
+    "MEMORY LEAK", "MEMORY PRESSURE", "OUT OF MEMORY", "OOM",
+    "HEAP GROWING", "HEAP EXHAUSTION", "HEAP SPACE",
+    "OUTOFMEMORYERROR", "ALLOCATION FAILED", "ALLOCATION FAILURE",
+    "GC OVERHEAD LIMIT", "HEAP USED CRITICAL", "MEMORY THRESHOLD",
+    "HEAP OUT OF MEMORY", "CANNOT ALLOCATE", "MEMORY CRITICAL",
+    "HEAP EXHAUSTED", "MEMORY LIMIT", "HEAP PRESSURE",
+]
+
+CPU_KEYWORDS = [
+    "CPU SPIKE", "HIGH COMPUTATION", "CPU USAGE CRITICAL",
+    "THREAD POOL EXHAUSTED", "COMPUTATION STARTED",
+]
+
+ALL_KEYWORDS = MEMORY_KEYWORDS + CPU_KEYWORDS
+
+# =============================================================================
+# TF-IDF FAILURE REFERENCE CORPUS
+# =============================================================================
+FAILURE_REFERENCE_CORPUS = [
+    "memory leak heap allocation increasing",
+    "out of memory error oom condition triggered",
+    "heap growing allocated chunks memory pressure",
+    "memory pressure critical heap exhaustion",
+    "garbage collection overhead limit exceeded",
+    "allocation failed heap used memory critical",
+    "cpu spike high computation thread started",
+    "memory threshold exceeded heap growing fast",
+    "fatal heap exhaustion process memory critical",
+    "java heap space outofmemoryerror gc overhead",
+]
