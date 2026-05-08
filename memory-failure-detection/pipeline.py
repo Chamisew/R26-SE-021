@@ -936,3 +936,137 @@ def stage3_hybrid_classifier(df, config):
         print(f"\n  [STAGE 3 ERROR] {exc}")
         raise
 
+
+# =============================================================================
+# STAGE 4 — SLIDING WINDOW FEATURE ENGINEERING
+# =============================================================================
+def stage4_sliding_window(df, config):
+    """
+    Per-service time-based sliding window feature extraction.
+    Novel features: memory_growth, heap_rate, gc_spike_count.
+    Returns a new DataFrame of window records.
+    """
+    print("\n" + "="*60)
+    print("STAGE 4 — SLIDING WINDOW FEATURE ENGINEERING")
+    print("="*60)
+
+    try:
+        window_minutes = config.get("window_minutes", 5)
+        lookback_delta = pd.Timedelta(minutes=window_minutes)
+        min_points = 3
+        records = []
+        window_id = int(config.get("window_id_start", 1))
+        window_row_counts = []
+        window_durations = []
+
+        for svc, grp in df.groupby("service_name", sort=False):
+            grp = grp.copy()
+            grp["timestamp"] = pd.to_datetime(grp["timestamp"], errors="coerce")
+            grp = grp.dropna(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
+            n = len(grp)
+
+            if n < min_points + 1:
+                print(f"  WARN: {svc} has only {n} valid timestamped rows — skipping.")
+                continue
+
+            for i in range(1, n):
+                current = grp.iloc[i]
+                current_ts = current["timestamp"]
+
+                window_start_ts = current_ts - lookback_delta
+                window = grp[
+                    (grp["timestamp"] >= window_start_ts)
+                    & (grp["timestamp"] < current_ts)
+                ]
+
+                # Skip sparse windows that cannot represent trends reliably.
+                if len(window) < min_points:
+                    continue
+
+                # -- Novel Feature 1: memory_growth --
+                memory_growth = (
+                    window["ram_percent"].iloc[-1]
+                    - window["ram_percent"].iloc[0]
+                )
+
+                # -- Novel Feature 2: heap_rate --
+                heap_diffs = window["heap_mb_used"].diff().dropna()
+                heap_rate  = heap_diffs.mean() if len(heap_diffs) > 0 else 0.0
+
+                # -- Novel Feature 3: gc_spike_count --
+                gc_diffs      = window["gc_count"].diff().dropna()
+                gc_spike_count = int((gc_diffs > 0).sum())
+
+                # -- Statistical Features --
+                ram_mean = window["ram_percent"].mean()
+                ram_max  = window["ram_percent"].max()
+                ram_std  = window["ram_percent"].std()
+                cpu_mean = window["cpu_percent"].mean()
+                cpu_max  = window["cpu_percent"].max()
+                heap_max = window["heap_mb_used"].max()
+                window_duration_seconds = (
+                    (window["timestamp"].iloc[-1] - window["timestamp"].iloc[0])
+                    / pd.Timedelta(seconds=1)
+                )
+
+                # -- Window Label --
+                window_label = (
+                    "FAILURE"
+                    if (window["ground_truth_label"] == "FAILURE").any()
+                    else "NORMAL"
+                )
+
+                records.append({
+                    "window_id"          : window_id,
+                    "timestamp"          : current["timestamp"],
+                    "service_name"       : current["service_name"],
+                    "stack"              : current["stack"],
+                    "log_template"       : current["log_template"],
+                    "template_id"        : current["template_id"],
+                    "ram_percent"        : current["ram_percent"],
+                    "cpu_percent"        : current["cpu_percent"],
+                    "heap_mb_used"       : current["heap_mb_used"],
+                    "gc_count"           : current["gc_count"],
+                    "memory_growth"      : memory_growth,
+                    "heap_rate"          : heap_rate,
+                    "gc_spike_count"     : gc_spike_count,
+                    "window_duration_seconds": window_duration_seconds,
+                    "ram_mean"           : ram_mean,
+                    "ram_max"            : ram_max,
+                    "ram_std"            : ram_std,
+                    "cpu_mean"           : cpu_mean,
+                    "cpu_max"            : cpu_max,
+                    "heap_max"           : heap_max,
+                    "hybrid_label"       : current["hybrid_label"],
+                    "ground_truth_label" : current["ground_truth_label"],
+                    "label_source"       : "ground_truth",
+                    "detection_layer"    : current["detection_layer"],
+                    "failure_type"       : current["failure_type"],
+                })
+                window_row_counts.append(len(window))
+                window_durations.append(float(window_duration_seconds))
+                window_id += 1
+
+        windows_df = pd.DataFrame(records)
+        print(f"  Total windows generated : {len(windows_df):,}")
+        if len(windows_df) > 0:
+            avg_duration = float(np.mean(window_durations)) if window_durations else 0.0
+            min_rows = int(np.min(window_row_counts)) if window_row_counts else 0
+            max_rows = int(np.max(window_row_counts)) if window_row_counts else 0
+            print(f"  Average window duration (sec) : {avg_duration:.1f}")
+            print(f"  Rows per window (min/max)     : {min_rows} / {max_rows}")
+            wl_dist = windows_df["ground_truth_label"].value_counts()
+            for lbl, cnt in wl_dist.items():
+                print(f"    window_label={lbl:<10} {cnt:>6}")
+        else:
+            print("  Average window duration (sec) : 0.0")
+            print("  Rows per window (min/max)     : 0 / 0")
+            print("    window_label=FAILURE        0")
+            print("    window_label=NORMAL         0")
+
+        print("\n  [STAGE 4 COMPLETE]")
+        return windows_df
+
+    except Exception as exc:
+        print(f"\n  [STAGE 4 ERROR] {exc}")
+        raise
