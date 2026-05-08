@@ -1070,3 +1070,155 @@ def stage4_sliding_window(df, config):
     except Exception as exc:
         print(f"\n  [STAGE 4 ERROR] {exc}")
         raise
+
+# =============================================================================
+# CONTINUOUS WINDOW SAVE (LIVE MODE)
+# =============================================================================
+
+_SERVICE_PROJECT_MAP = {}
+_NEXT_PROJECT_ID = 1
+
+def get_project_id(stack_name):
+    global _NEXT_PROJECT_ID
+    if stack_name not in _SERVICE_PROJECT_MAP:
+        _SERVICE_PROJECT_MAP[stack_name] = f"project_{_NEXT_PROJECT_ID}"
+        _NEXT_PROJECT_ID += 1
+    return _SERVICE_PROJECT_MAP[stack_name]
+
+def continuous_save(windows_df, config):
+    """
+    Append only new windows to pipeline_output.csv and ml_ready_dataset.csv.
+    Newness is determined by monotonic window_id.
+    """
+    try:
+        if windows_df is None or windows_df.empty:
+            return 0
+
+        os.makedirs(config["output_dir"], exist_ok=True)
+        out_pipeline = os.path.join(config["output_dir"], "pipeline_output.csv")
+        out_ml = os.path.join(config["output_dir"], "ml_ready_dataset.csv")
+
+        windows_df = add_failure_trends(windows_df)
+        windows_df = add_ram_std_trend(windows_df)
+
+        with pipeline_state_lock:
+            last_saved_id = int(pipeline_state["last_window_id"])
+
+        new_rows = windows_df[windows_df["window_id"] > last_saved_id].copy()
+        if new_rows.empty:
+            return 0
+
+        pipeline_cols = [
+            "window_id", "timestamp", "service_name", "stack",
+            "log_template", "template_id",
+            "ram_percent", "cpu_percent", "heap_mb_used", "gc_count",
+            "memory_growth", "heap_rate", "gc_spike_count",
+            "ram_mean", "ram_max", "ram_std",
+            "cpu_mean", "cpu_max", "heap_max",
+            "hybrid_label", "ground_truth_label", "label_source",
+            "detection_layer", "failure_type",
+        ]
+        ml_cols_raw = [
+            "timestamp", "service_name", "window_id",
+            "memory_growth", "heap_rate", "gc_spike_count",
+            "ram_mean", "ram_max", "ram_std",
+            "cpu_mean", "cpu_max", "heap_max",
+            "gc_count", "ram_percent", "heap_mb_used",
+            "failure_type", "hybrid_label",
+            "ram_std_trend",
+            "trend_slope_5m", "trend_max_failures_5m", "trend_variance_5m",
+            "trend_slope_10m", "trend_max_failures_10m", "trend_variance_10m"
+        ]
+        for col in pipeline_cols + ml_cols_raw:
+            if col not in new_rows.columns:
+                new_rows[col] = np.nan
+
+        write_header_pipeline = not os.path.exists(out_pipeline)
+        new_rows[pipeline_cols].to_csv(
+            out_pipeline,
+            mode="a",
+            header=write_header_pipeline,
+            index=False
+        )
+
+        ml_df = new_rows[ml_cols_raw].copy()
+        ml_df["project_id"] = new_rows["stack"].apply(get_project_id)
+        ml_df["label"] = ml_df["hybrid_label"]
+        ml_df["failure_type"] = ml_df.apply(lambda row: row["failure_type"] if row["label"] == "FAILURE" else "", axis=1)
+        ml_df["incident_phase_1"] = 0
+        ml_df["incident_phase_2"] = 0
+        ml_df.drop(columns=["hybrid_label"], inplace=True)
+
+        final_ml_cols = [
+            "timestamp", "project_id", "service_name", "window_id",
+            "memory_growth", "heap_rate", "gc_spike_count",
+            "ram_mean", "ram_max", "ram_std", "ram_std_trend",
+            "trend_slope_5m", "trend_max_failures_5m", "trend_variance_5m",
+            "trend_slope_10m", "trend_max_failures_10m", "trend_variance_10m",
+            "heap_max", "gc_count", "ram_percent", "heap_mb_used", 
+            "label", "failure_type", "incident_phase_1", "incident_phase_2"
+        ]
+        ml_df = ml_df[final_ml_cols]
+
+        write_header_ml = not os.path.exists(out_ml)
+        ml_df.to_csv(
+            out_ml,
+            mode="a",
+            header=write_header_ml,
+            index=False
+        )
+
+        new_last_id = int(new_rows["window_id"].max())
+        with pipeline_state_lock:
+            pipeline_state["last_window_id"] = max(
+                int(pipeline_state["last_window_id"]), new_last_id
+            )
+            pipeline_state["last_updated"] = datetime.now()
+
+        print(f"  [SAVE] Appended {len(new_rows)} new windows -> {out_pipeline}")
+        print(f"  [SAVE] Appended {len(new_rows)} new windows -> {out_ml}")
+        return len(new_rows)
+
+    except Exception as exc:
+        print(f"  [SAVE ERROR] {exc}")
+        return 0
+
+
+# =============================================================================
+# WINDOW FETCH HELPERS (for API / Component 3 polling)
+# =============================================================================
+def get_latest_windows(n=50):
+    """
+    Return the latest n rows from output/ml_ready_dataset.csv as list[dict].
+    """
+    try:
+        ml_path = os.path.join(CONFIG["output_dir"], "ml_ready_dataset.csv")
+        if not os.path.exists(ml_path):
+            return []
+        df = pd.read_csv(ml_path)
+        if df.empty:
+            return []
+        return df.tail(int(n)).to_dict(orient="records")
+    except Exception as exc:
+        print(f"[WARN] get_latest_windows failed: {exc}")
+        return []
+
+
+def get_new_windows_since(last_window_id):
+    """
+    Return rows with window_id > last_window_id from ml_ready_dataset.csv.
+    """
+    try:
+        ml_path = os.path.join(CONFIG["output_dir"], "ml_ready_dataset.csv")
+        if not os.path.exists(ml_path):
+            return []
+        df = pd.read_csv(ml_path)
+        if df.empty:
+            return []
+        if "window_id" not in df.columns:
+            return []
+        new_df = df[df["window_id"] > int(last_window_id)]
+        return new_df.to_dict(orient="records")
+    except Exception as exc:
+        print(f"[WARN] get_new_windows_since failed: {exc}")
+        return []
