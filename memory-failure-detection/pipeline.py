@@ -775,3 +775,164 @@ def stage2_drain3_parsing(df, config):
     except Exception as exc:
         print(f"\n  [STAGE 2 ERROR] {exc}")
         raise
+
+
+# =============================================================================
+# STAGE 3 — THREE-LAYER HYBRID CLASSIFIER
+# =============================================================================
+def _layer1_keyword(template: str):
+    """Layer 1: keyword matching on the Drain3 template."""
+    upper = template.upper()
+    for kw in MEMORY_KEYWORDS:
+        if kw in upper:
+            return "FAILURE", "keyword", "memory_leak"
+    for kw in CPU_KEYWORDS:
+        if kw in upper:
+            return "FAILURE", "keyword", "cpu_spike"
+    return None, None, None
+
+
+def _build_tfidf(df):
+    """
+    Fit TF-IDF on (unique templates + reference corpus).
+    Returns vectorizer, template matrix, reference matrix.
+    """
+    unique_templates = df["log_template"].unique().tolist()
+    all_docs = unique_templates + FAILURE_REFERENCE_CORPUS
+
+    vectorizer = TfidfVectorizer(
+        ngram_range=(1, 2),
+        max_features=5000,
+        sublinear_tf=True,
+    )
+    vectorizer.fit(all_docs)
+
+    tmpl_matrix = vectorizer.transform(unique_templates)
+    ref_matrix  = vectorizer.transform(FAILURE_REFERENCE_CORPUS)
+
+    return vectorizer, tmpl_matrix, ref_matrix, unique_templates
+
+
+def _layer2_tfidf(template: str, tmpl_lookup: dict, threshold: float):
+    """Layer 2: cosine similarity against failure reference corpus."""
+    vec = tmpl_lookup.get(template)
+    if vec is None:
+        return "NORMAL", "normal"
+    if vec > threshold:
+        return "FAILURE", "tfidf_semantic"
+    return "NORMAL", "normal"
+
+
+def _metric_score(row, service_gc_history: dict):
+    """
+    Compute metric fusion score for a single row.
+    Also updates the rolling gc_count history for the service.
+    """
+    score = 0
+
+    ram  = row["ram_percent"]
+    heap = row["heap_mb_used"]
+    cpu  = row["cpu_percent"]
+    gc   = row["gc_count"]
+    svc  = row["service_name"]
+
+    if ram  > 75: score += 2
+    if ram  > 60: score += 1
+    if heap > 350: score += 2
+    if heap > 280: score += 1
+    if cpu  > 80:  score += 2
+
+    # GC spike: check if gc_count increased by > 3 in last 10 rows
+    history = service_gc_history.setdefault(svc, [])
+    history.append(gc)
+    if len(history) > 10:
+        history.pop(0)
+    if len(history) >= 2:
+        gc_increase = history[-1] - history[0]
+        if gc_increase > 3:
+            score += 2
+
+    return score
+
+
+def stage3_hybrid_classifier(df, config):
+    """
+    Apply three-layer hybrid classifier in sequence.
+    Adds 'hybrid_label' and 'detection_layer' columns.
+    """
+    print("\n" + "="*60)
+    print("STAGE 3 — THREE-LAYER HYBRID CLASSIFIER")
+    print("="*60)
+
+    try:
+        threshold = config["tfidf_threshold"]
+        metric_thresh = config["metric_score_threshold"]
+
+        # -- Pre-compute TF-IDF similarities (once for all templates) --
+        print("  Building TF-IDF similarity index …")
+        _, tmpl_matrix, ref_matrix, unique_templates = _build_tfidf(df)
+        sim_matrix = cosine_similarity(tmpl_matrix, ref_matrix)
+        max_sims   = sim_matrix.max(axis=1)  # shape: (n_unique_templates,)
+        tmpl_to_maxsim = {
+            tmpl: max_sims[i]
+            for i, tmpl in enumerate(unique_templates)
+        }
+        print(f"  TF-IDF index built over {len(unique_templates)} unique templates.")
+
+        hybrid_labels    = []
+        detection_layers = []
+        failure_types    = []
+        service_gc_hist  = {}
+
+        for _, row in df.iterrows():
+            template = str(row["log_template"])
+
+            # Layer 1
+            label, layer, failure_type = _layer1_keyword(template)
+
+            # Layer 2 (only if Layer 1 found nothing)
+            if label is None:
+                label, layer = _layer2_tfidf(
+                    template, tmpl_to_maxsim, threshold
+                )
+                failure_type = None
+
+            # Layer 3 — metric fusion
+            mscore = _metric_score(row, service_gc_hist)
+
+            if label == "FAILURE" and mscore >= 2:
+                layer = layer + "_metric_confirmed"
+            elif label == "NORMAL" and mscore >= metric_thresh:
+                label = "FAILURE"
+                layer = "metric_fusion"
+                failure_type = "metric_only"
+
+            if label == "NORMAL":
+                failure_type = "none"
+            elif failure_type is None:
+                # Covers semantic detections that are not metric-only.
+                failure_type = "none"
+
+            hybrid_labels.append(label)
+            detection_layers.append(layer)
+            failure_types.append(failure_type)
+
+        df["hybrid_label"]    = hybrid_labels
+        df["detection_layer"] = detection_layers
+        df["failure_type"]    = failure_types
+
+        # Summary
+        print(f"\n  hybrid_label distribution:")
+        for lbl, cnt in df["hybrid_label"].value_counts().items():
+            print(f"    {lbl:<10} {cnt:>6}")
+        print(f"\n  failure_type distribution:")
+        for ftype, cnt in df["failure_type"].value_counts().items():
+            print(f"    {ftype:<12} {cnt:>6}")
+
+        print("\n  [STAGE 3 COMPLETE]")
+        return df
+
+    except Exception as exc:
+        print(f"\n  [STAGE 3 ERROR] {exc}")
+        raise
+
