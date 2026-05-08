@@ -102,3 +102,47 @@ FAILURE_REFERENCE_CORPUS = [
     "fatal heap exhaustion process memory critical",
     "java heap space outofmemoryerror gc overhead",
 ]
+
+
+# =============================================================================
+# STAGE 1 — DATA LOADER  (CSV mode)
+# =============================================================================
+def stage1_load_data(config):
+    """
+    Load raw_logs_metrics.csv, sort by timestamp, and report distributions.
+    Returns a single sorted DataFrame.
+    """
+    print("\n" + "="*60)
+    print("STAGE 1 — DATA LOADER (CSV mode)")
+    print("="*60)
+
+    try:
+        csv_path = config["input_csv"]
+        if not os.path.exists(csv_path):
+            raise FileNotFoundError(f"Input CSV not found: {csv_path}")
+
+        df = pd.read_csv(csv_path, parse_dates=["timestamp"])
+        df.sort_values("timestamp", inplace=True)
+        df.reset_index(drop=True, inplace=True)
+
+        print(f"  Total rows loaded : {len(df):,}")
+        print(f"  Columns           : {list(df.columns)}")
+
+        # Rows per service
+        print("\n  Rows per service:")
+        for svc, cnt in df.groupby("service_name").size().items():
+            print(f"    {svc:<40} {cnt:>5} rows")
+
+        # Label distribution
+        label_dist = df["ground_truth_label"].value_counts()
+        print("\n  Ground-truth label distribution:")
+        for lbl, cnt in label_dist.items():
+            pct = cnt / len(df) * 100
+            print(f"    {lbl:<10} {cnt:>6} ({pct:.1f}%)")
+
+        print("\n  [STAGE 1 COMPLETE]")
+        return df
+
+    except Exception as exc:
+        print(f"\n  [STAGE 1 ERROR] {exc}")
+        sys.exit(1)
