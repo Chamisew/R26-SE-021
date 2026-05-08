@@ -1222,3 +1222,112 @@ def get_new_windows_since(last_window_id):
     except Exception as exc:
         print(f"[WARN] get_new_windows_since failed: {exc}")
         return []
+
+
+# =============================================================================
+# DATASET ENRICHMENT UTILITIES
+# =============================================================================
+def label_incident_phases(df, failure_timestamp, project_id, failure_type):
+    df = df.copy()
+    df['project_id'] = project_id
+    
+    # Ensure timestamp is datetime
+    df['timestamp'] = pd.to_datetime(df['timestamp'])
+    if isinstance(failure_timestamp, str):
+        failure_timestamp = pd.to_datetime(failure_timestamp)
+        
+    delta = (failure_timestamp - df['timestamp']).dt.total_seconds()
+    
+    # Defaults
+    df['label'] = 'NORMAL'
+    df['incident_phase_1'] = 0
+    df['incident_phase_2'] = 0
+    df['failure_type'] = ""
+    
+    # Masks
+    mask_after = delta < 0
+    mask_0_to_5 = (delta >= 0) & (delta <= 5 * 60)
+    mask_5_to_7 = (delta > 5 * 60) & (delta <= 7 * 60)
+    
+    # 5-7min before
+    df.loc[mask_5_to_7, 'incident_phase_1'] = 1
+    
+    # 0-5min before
+    df.loc[mask_0_to_5, 'label'] = 'PRE_FAILURE'
+    df.loc[mask_0_to_5, 'incident_phase_1'] = 1
+    df.loc[mask_0_to_5, 'incident_phase_2'] = 1
+    df.loc[mask_0_to_5, 'failure_type'] = failure_type
+    
+    # after
+    df.loc[mask_after, 'label'] = 'FAILURE'
+    df.loc[mask_after, 'incident_phase_1'] = 1
+    df.loc[mask_after, 'incident_phase_2'] = 1
+    df.loc[mask_after, 'failure_type'] = failure_type
+    
+    print("\n  [LABEL INCIDENT PHASES] Counts:")
+    print(df['label'].value_counts())
+    return df
+
+def add_ram_std_trend(df, n_windows=3):
+    if "ram_std" not in df.columns:
+        df['ram_std_trend'] = 0.0
+        return df
+    df = df.copy()
+    
+    def calc_trend(group):
+        return (group['ram_std'] - group['ram_std'].shift(n_windows)) / n_windows
+        
+    df['ram_std_trend'] = df.groupby('service_name', group_keys=False).apply(calc_trend)
+    df['ram_std_trend'] = df['ram_std_trend'].fillna(0.0)
+    return df
+
+def add_failure_trends(df):
+    df = df.copy()
+    if df.empty or 'hybrid_label' not in df.columns:
+        df['trend_slope_5m'] = 0.0
+        df['trend_max_failures_5m'] = 0.0
+        df['trend_variance_5m'] = 0.0
+        df['trend_slope_10m'] = 0.0
+        df['trend_max_failures_10m'] = 0.0
+        df['trend_variance_10m'] = 0.0
+        return df
+
+    original_index = df.index
+    df = df.reset_index(drop=True)
+    df['timestamp'] = pd.to_datetime(df['timestamp'], errors='coerce')
+    df['is_failure'] = (df['hybrid_label'] == 'FAILURE').astype(int)
+
+    def calc_slope(y):
+        n = len(y)
+        if n < 2: return 0.0
+        x = np.arange(n)
+        x_mean = (n - 1) / 2.0
+        y_mean = np.mean(y)
+        num = np.sum((x - x_mean) * (y - y_mean))
+        den = np.sum((x - x_mean)**2)
+        return num / den if den != 0 else 0.0
+
+    new_cols = ['trend_slope_5m', 'trend_max_failures_5m', 'trend_variance_5m',
+                'trend_slope_10m', 'trend_max_failures_10m', 'trend_variance_10m']
+    for col in new_cols:
+        df[col] = 0.0
+
+    for svc, group in df.groupby('service_name'):
+        g = group.sort_values('timestamp')
+        idx = g.index
+        
+        g_indexed = g.set_index('timestamp')
+        fail_sum_1m = g_indexed['is_failure'].rolling('1min').sum()
+        
+        df.loc[idx, 'trend_max_failures_5m'] = fail_sum_1m.rolling('5min').max().values
+        df.loc[idx, 'trend_variance_5m'] = fail_sum_1m.rolling('5min').var().fillna(0.0).values
+        df.loc[idx, 'trend_slope_5m'] = fail_sum_1m.rolling('5min').apply(calc_slope, raw=True).fillna(0.0).values
+        
+        df.loc[idx, 'trend_max_failures_10m'] = fail_sum_1m.rolling('10min').max().values
+        df.loc[idx, 'trend_variance_10m'] = fail_sum_1m.rolling('10min').var().fillna(0.0).values
+        df.loc[idx, 'trend_slope_10m'] = fail_sum_1m.rolling('10min').apply(calc_slope, raw=True).fillna(0.0).values
+
+    df = df.drop(columns=['is_failure'])
+    df.index = original_index
+    return df
+
