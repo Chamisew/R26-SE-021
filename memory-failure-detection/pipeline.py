@@ -189,3 +189,130 @@ def _has_gc_keyword(text: str) -> bool:
     upper = text.upper()
     return any(k in upper for k in GC_KEYWORDS)
 
+
+# ---- Per-container collector (runs in its own thread) -----------------------
+def _collect_container(
+    container,
+    duration_seconds: int,
+    interval_seconds: int,
+    results_list: list,
+    results_lock: threading.Lock,
+    error_counter: list,
+    warning_counter: list,
+) -> None:
+    """
+    Collect stats + logs from a single container every `interval_seconds`.
+    Appends row dicts to `results_list` (thread-safe via lock).
+    Runs until `duration_seconds` have elapsed.
+    """
+    gc_cumulative = 0          # cumulative GC event counter for this container
+    start_time    = time.monotonic()
+
+    # Determine stack once from the image tag
+    try:
+        image_tag = container.image.tags[0] if container.image.tags else ""
+    except Exception:
+        image_tag = ""
+    stack = _detect_stack(image_tag)
+
+    while duration_seconds <= 0 or (time.monotonic() - start_time) < duration_seconds:
+        tick_start = time.monotonic()
+        row = {}
+
+        # -- Refresh container state (may have stopped) -----------------------
+        try:
+            container.reload()
+            if container.status != "running":
+                print(f"  [WARN] Container '{container.name}' is no longer running — stopping its collector.")
+                with results_lock:
+                    warning_counter[0] += 1
+                break
+        except Exception as exc:
+            print(f"  [WARN] Could not reload container '{container.name}': {exc}")
+            with results_lock:
+                warning_counter[0] += 1
+            break
+
+        # -- Docker STATS (stream=False → single snapshot, non-blocking) ------
+        try:
+            stats = container.stats(stream=False)
+
+            # CPU %
+            cpu_delta    = (
+                stats["cpu_stats"]["cpu_usage"]["total_usage"]
+                - stats["precpu_stats"]["cpu_usage"]["total_usage"]
+            )
+            system_delta = (
+                stats["cpu_stats"].get("system_cpu_usage", 0)
+                - stats["precpu_stats"].get("system_cpu_usage", 0)
+            )
+            num_cpus = len(
+                stats["cpu_stats"]["cpu_usage"].get("percpu_usage", [1])
+            ) or 1
+            if system_delta > 0:
+                cpu_percent = (cpu_delta / system_delta) * num_cpus * 100.0
+            else:
+                cpu_percent = 0.0
+
+            # RAM
+            mem_usage = stats["memory_stats"]["usage"]
+            mem_limit = stats["memory_stats"]["limit"]
+            ram_percent  = (mem_usage / mem_limit * 100.0) if mem_limit > 0 else 0.0
+            heap_mb_used = mem_usage / (1024 * 1024)
+
+        except (KeyError, TypeError, ZeroDivisionError) as exc:
+            print(f"  [WARN] Incomplete stats for '{container.name}': {exc}")
+            with results_lock:
+                warning_counter[0] += 1
+            # Sleep remainder of interval and retry
+            elapsed = time.monotonic() - tick_start
+            time.sleep(max(0, interval_seconds - elapsed))
+            continue
+        except Exception as exc:
+            print(f"  [ERROR] Stats API failure for '{container.name}': {exc}")
+            with results_lock:
+                error_counter[0] += 1
+            elapsed = time.monotonic() - tick_start
+            time.sleep(max(0, interval_seconds - elapsed))
+            continue
+
+        # -- Docker LOGS (last 3 lines) ----------------------------------------
+        try:
+            raw_logs = container.logs(
+                stdout=True, stderr=True,
+                tail=3, timestamps=False
+            )
+            log_lines = raw_logs.decode("utf-8", errors="replace").strip().splitlines()
+            log_message = " | ".join(log_lines[-3:]) if log_lines else ""
+        except Exception as exc:
+            print(f"  [WARN] Log decoding failed for '{container.name}': {exc}")
+            with results_lock:
+                warning_counter[0] += 1
+            log_message = ""
+
+        # -- Derived fields ---------------------------------------------------
+        log_level = _detect_log_level(log_message)
+
+        if _has_gc_keyword(log_message):
+            gc_cumulative += 1
+
+        row = {
+            "timestamp"          : datetime.now(),
+            "service_name"       : container.name,
+            "stack"              : stack,
+            "log_level"          : log_level,
+            "log_message"        : log_message,
+            "ram_percent"        : round(ram_percent, 4),
+            "cpu_percent"        : round(cpu_percent, 4),
+            "heap_mb_used"       : round(heap_mb_used, 4),
+            "gc_count"           : gc_cumulative,
+            "ground_truth_label" : "UNKNOWN",
+            "failure_type"       : "none",
+        }
+
+        with results_lock:
+            results_list.append(row)
+
+        # Sleep for the remainder of the interval
+        elapsed = time.monotonic() - tick_start
+        time.sleep(max(0, interval_seconds - elapsed))
