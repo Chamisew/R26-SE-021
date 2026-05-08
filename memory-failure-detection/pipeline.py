@@ -316,3 +316,61 @@ def _collect_container(
         # Sleep for the remainder of the interval
         elapsed = time.monotonic() - tick_start
         time.sleep(max(0, interval_seconds - elapsed))
+
+# ---- Live dashboard printer -------------------------------------------------
+def _print_dashboard(
+    elapsed_sec: int,
+    total_sec: int,
+    results_list: list,
+    results_lock: threading.Lock,
+    warning_counter: list,
+    error_counter: list,
+) -> None:
+    """
+    Print a live ASCII dashboard showing per-container stats.
+    Called every INTERVAL seconds from the main thread.
+    """
+    elapsed_td = str(timedelta(seconds=elapsed_sec))
+    total_td   = str(timedelta(seconds=total_sec))
+
+    with results_lock:
+        snapshot = list(results_list)  # shallow copy while holding lock
+
+    total_rows = len(snapshot)
+
+    # Aggregate latest row per container
+    latest: dict[str, dict] = {}
+    for row in snapshot:
+        latest[row["service_name"]] = row  # last row wins
+
+    warnings_count = warning_counter[0]
+    errors_count   = error_counter[0]
+
+    # Build dashboard lines
+    border_width = 56
+    header = f"  LIVE COLLECTION — {elapsed_td} elapsed / {total_td} total  "
+    col_header = f"  {'Container':<24} {'RAM%':>6}  {'CPU%':>6}  {'Heap(MB)':>9}"
+
+    print()
+    print("╔" + "═" * border_width + "╗")
+    print("║" + header.center(border_width) + "║")
+    print("╠" + "═" * border_width + "╣")
+    print("║" + col_header.ljust(border_width) + "║")
+
+    if not latest:
+        empty_line = "  (no data yet)"
+        print("║" + empty_line.ljust(border_width) + "║")
+    else:
+        for cname, row in sorted(latest.items()):
+            ram  = row["ram_percent"]
+            cpu  = row["cpu_percent"]
+            heap = row["heap_mb_used"]
+            warn_flag = " ⚠️ " if ram > 70 else "    "
+            line = (
+                f"  {cname:<24} {ram:>5.1f}%  {cpu:>5.1f}%  {heap:>7.1f}MB"
+                + warn_flag
+            )
+            print("║" + line.ljust(border_width) + "║")
+
+    print("╚" + "═" * border_width + "╝")
+    print(f"  Total rows: {total_rows} | Warnings: {warnings_count} | Errors: {errors_count}")
