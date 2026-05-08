@@ -48,3 +48,22 @@ pipeline_state = {
     "failure_count": 0,
     "normal_count": 0,
 }
+
+# =============================================================================
+# CONFIG — edit these values to tune the pipeline
+# =============================================================================
+CONFIG = {
+    "input_csv"              : "data/raw_logs_metrics.csv",
+    "output_dir"             : "output/",
+    "models_dir"             : "models/",
+    "drain3_depth"           : 4,
+    "drain3_sim_thresh"      : 0.4,
+    "drain3_max_children"    : 100,
+    "window_size"            : 12,
+    "window_minutes"         : 5,
+    "tfidf_threshold"        : 0.12,   # lowered: catches more semantic failures
+    "metric_score_threshold" : 3,      # lowered: metric fusion upgrades sooner
+    # Live collection settings
+    "live_duration_minutes"  : -1,
+    "live_output_csv"        : "output/live_raw_collection.csv",
+}
