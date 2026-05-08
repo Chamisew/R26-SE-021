@@ -146,3 +146,46 @@ def stage1_load_data(config):
     except Exception as exc:
         print(f"\n  [STAGE 1 ERROR] {exc}")
         sys.exit(1)
+
+# =============================================================================
+# STAGE 1 — LIVE DOCKER COLLECTOR  (live mode)
+# =============================================================================
+
+# ---- Helper: detect stack from image tag ------------------------------------
+def _detect_stack(image_tag: str) -> str:
+    """
+    Map a Docker image tag string to a human-readable technology stack name.
+    """
+    tag = (image_tag or "").lower()
+    if "python" in tag or "flask" in tag:
+        return "Python/Flask"
+    if "node" in tag:
+        return "Node.js/Express"
+    if "java" in tag or "spring" in tag:
+        return "Java/SpringBoot"
+    if "dotnet" in tag or "aspnet" in tag or "microsoft/dotnet" in tag:
+        return ".NET/Core"
+    if "golang" in tag or "/go" in tag or tag.startswith("go:"):
+        return "Go/net_http"
+    return "Unknown"
+
+
+# ---- Helper: detect log level from a log line --------------------------------
+def _detect_log_level(text: str) -> str:
+    upper = text.upper()
+    if any(k in upper for k in ("CRITICAL", "FATAL")):
+        return "CRITICAL"
+    if any(k in upper for k in ("ERROR", "EXCEPTION", "OOM")):
+        return "ERROR"
+    if any(k in upper for k in ("WARN", "WARNING")):
+        return "WARNING"
+    return "INFO"
+
+
+# ---- Helper: check GC keyword presence --------------------------------------
+GC_KEYWORDS = ("GC", "GARBAGE", "COLLECTION")
+
+def _has_gc_keyword(text: str) -> bool:
+    upper = text.upper()
+    return any(k in upper for k in GC_KEYWORDS)
+
