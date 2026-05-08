@@ -374,3 +374,249 @@ def _print_dashboard(
 
     print("╚" + "═" * border_width + "╝")
     print(f"  Total rows: {total_rows} | Warnings: {warnings_count} | Errors: {errors_count}")
+
+# ---- Main live-collection entry point ---------------------------------------
+def stage1_collect_live(duration_minutes: int = 10) -> pd.DataFrame:
+    """
+    Connect to Docker Desktop, discover all running containers, and collect
+    hardware stats + log lines every 5 seconds for `duration_minutes`.
+
+    Returns a DataFrame with columns matching the Stage 2–5 schema:
+        timestamp, service_name, stack, log_level, log_message,
+        ram_percent, cpu_percent, heap_mb_used, gc_count,
+        ground_truth_label, failure_type
+    """
+    INTERVAL_SEC  = 5
+    DURATION_SEC  = duration_minutes * 60
+    PROCESS_INTERVAL_SEC = 30
+
+    print("\n" + "="*60)
+    print("STAGE 1 — LIVE DOCKER COLLECTOR")
+    print("="*60)
+    print(f"  Duration   : {duration_minutes} minutes ({DURATION_SEC}s)")
+    print(f"  Interval   : every {INTERVAL_SEC} seconds")
+
+    # -- Connect to Docker Desktop -------------------------------------------
+    try:
+        import docker  # imported here so CSV mode works without docker installed
+        try:
+            client = docker.from_env()          # handles Windows named-pipe automatically
+            client.ping()                        # raises if Docker is not reachable
+        except Exception:
+            # Explicit named-pipe fallback for Windows
+            client = docker.DockerClient(base_url="npipe:////./pipe/docker_engine")
+            client.ping()
+    except Exception as exc:
+        print(
+            "\nERROR: Docker Desktop is not running.\n"
+            "Please start Docker Desktop and try again.\n"
+            f"(Detail: {exc})"
+        )
+        sys.exit(1)
+
+    # -- Discover running containers -----------------------------------------
+    containers = client.containers.list()
+    if not containers:
+        print(
+            "\n  [WARN] No running containers found.\n"
+            "  Start at least one Docker container and rerun the pipeline."
+        )
+        return pd.DataFrame(columns=[
+            "timestamp", "service_name", "stack", "log_level", "log_message",
+            "ram_percent", "cpu_percent", "heap_mb_used", "gc_count",
+            "ground_truth_label", "failure_type",
+        ])
+
+    print(f"\n  Discovered {len(containers)} running container(s):")
+    for c in containers:
+        img = c.image.tags[0] if c.image.tags else "<no tag>"
+        print(f"    • {c.name:<35} image: {img}")
+
+    # -- Shared state (thread-safe) ------------------------------------------
+    results_list    : list  = []
+    results_lock            = threading.Lock()
+    error_counter   : list  = [0]   # mutable wrapper for thread mutation
+    warning_counter : list  = [0]
+
+    # -- Spawn one thread per container --------------------------------------
+    threads = []
+    for container in containers:
+        t = threading.Thread(
+            target=_collect_container,
+            args=(
+                container,
+                DURATION_SEC,
+                INTERVAL_SEC,
+                results_list,
+                results_lock,
+                error_counter,
+                warning_counter,
+            ),
+            daemon=True,
+            name=f"collector-{container.name}",
+        )
+        t.start()
+        threads.append(t)
+
+    print(f"\n  Started {len(threads)} collector thread(s). Collecting …\n")
+
+    # -- Dashboard loop (main thread) ----------------------------------------
+    collection_start = time.monotonic()
+    last_print_time  = collection_start
+    next_process_time = collection_start + PROCESS_INTERVAL_SEC
+    last_saved_raw_rows = 0
+
+    with pipeline_state_lock:
+        pipeline_state["status"] = "collecting"
+        pipeline_state["started_at"] = datetime.now()
+        pipeline_state["last_updated"] = datetime.now()
+
+    try:
+        while True:
+            now     = time.monotonic()
+            elapsed = now - collection_start
+
+            if DURATION_SEC > 0 and elapsed >= DURATION_SEC:
+                break
+
+            if (now - last_print_time) >= INTERVAL_SEC:
+                _print_dashboard(
+                    int(elapsed),
+                    DURATION_SEC,
+                    results_list,
+                    results_lock,
+                    warning_counter,
+                    error_counter,
+                )
+                # Brief inline progress line
+                with results_lock:
+                    n_rows = len(results_list)
+                ram_vals = [
+                    r["ram_percent"]
+                    for r in results_list
+                    if r["ram_percent"] > 0
+                ]
+                ram_avg = sum(ram_vals) / len(ram_vals) if ram_vals else 0.0
+                active_containers = len(set(r["service_name"] for r in results_list))
+                print(
+                    f"  [{int(elapsed)}s] "
+                    f"Containers: {active_containers} | "
+                    f"Rows: {n_rows} | "
+                    f"RAM avg: {ram_avg:.1f}%"
+                )
+                last_print_time = now
+
+            # -- Periodic Stage 2-4 processing every 30s ----------------------
+            if now >= next_process_time:
+                try:
+                    with results_lock:
+                        snapshot = list(results_list)
+
+                    if snapshot:
+                        raw_snapshot_df = pd.DataFrame(snapshot)
+                        raw_snapshot_df.sort_values("timestamp", inplace=True)
+                        raw_snapshot_df.reset_index(drop=True, inplace=True)
+
+                        # Incremental raw CSV append (live_raw_collection.csv)
+                        os.makedirs("output", exist_ok=True)
+                        raw_csv_path = CONFIG["live_output_csv"]
+                        new_raw_df = raw_snapshot_df.iloc[last_saved_raw_rows:].copy()
+                        if len(new_raw_df) > 0:
+                            write_header = not os.path.exists(raw_csv_path)
+                            new_raw_df.to_csv(
+                                raw_csv_path,
+                                mode="a",
+                                header=write_header,
+                                index=False
+                            )
+                            last_saved_raw_rows = len(raw_snapshot_df)
+
+                        # Run Stage 1.5 -> 2 -> 3 -> 4 on collected-so-far data
+                        with pipeline_state_lock:
+                            pipeline_state["status"] = "processing"
+                            pipeline_state["last_updated"] = datetime.now()
+
+                        processed_df = stage1_5_preprocess(raw_snapshot_df)
+                        if not processed_df.empty:
+                            processed_df = stage2_drain3_parsing(processed_df, CONFIG)
+                            processed_df = stage3_hybrid_classifier(processed_df, CONFIG)
+                            windows_df_partial = stage4_sliding_window(processed_df, CONFIG)
+                        else:
+                            windows_df_partial = pd.DataFrame()
+
+                        if windows_df_partial is not None and not windows_df_partial.empty:
+                            continuous_save(windows_df_partial, CONFIG)
+
+                            failure_count = int(
+                                (windows_df_partial["ground_truth_label"] == "FAILURE").sum()
+                            )
+                            normal_count = int(
+                                (windows_df_partial["ground_truth_label"] == "NORMAL").sum()
+                            )
+                            with pipeline_state_lock:
+                                pipeline_state["raw_df"] = processed_df.copy()
+                                pipeline_state["windows_df"] = windows_df_partial.copy()
+                                pipeline_state["rows_collected"] = len(raw_snapshot_df)
+                                pipeline_state["windows_generated"] = len(windows_df_partial)
+                                pipeline_state["active_services"] = sorted(
+                                    processed_df["service_name"].astype(str).unique().tolist()
+                                )
+                                pipeline_state["last_updated"] = datetime.now()
+                                pipeline_state["failure_count"] = failure_count
+                                pipeline_state["normal_count"] = normal_count
+                                pipeline_state["status"] = "collecting"
+
+                            print(
+                                f"  [PIPELINE] {len(raw_snapshot_df)} rows | "
+                                f"{len(windows_df_partial)} windows | "
+                                f"{failure_count} FAILURE | {normal_count} NORMAL"
+                            )
+                except Exception as proc_exc:
+                    print(f"  [WARN] Periodic pipeline processing failed: {proc_exc}")
+                    with pipeline_state_lock:
+                        pipeline_state["status"] = "collecting"
+                        pipeline_state["last_updated"] = datetime.now()
+                finally:
+                    next_process_time += PROCESS_INTERVAL_SEC
+
+            time.sleep(0.5)  # tight sleep so we don't overshoot much
+    except KeyboardInterrupt:
+        print("\n  [INFO] Live collection interrupted by user! Saving data collected so far...")
+
+    # -- Wait for all threads to finish --------------------------------------
+    for t in threads:
+        t.join(timeout=INTERVAL_SEC + 2)
+
+    # -- Build DataFrame -----------------------------------------------------
+    if not results_list:
+        print("\n  [WARN] No data collected — returning empty DataFrame.")
+        df = pd.DataFrame(columns=[
+            "timestamp", "service_name", "stack", "log_level", "log_message",
+            "ram_percent", "cpu_percent", "heap_mb_used", "gc_count",
+            "ground_truth_label", "failure_type",
+        ])
+    else:
+        df = pd.DataFrame(results_list)
+        # Ensure exact column order expected by downstream stages
+        df = df[[
+            "timestamp", "service_name", "stack", "log_level", "log_message",
+            "ram_percent", "cpu_percent", "heap_mb_used", "gc_count",
+            "ground_truth_label", "failure_type",
+        ]]
+        df.sort_values("timestamp", inplace=True)
+        df.reset_index(drop=True, inplace=True)
+
+    print(f"\n  Collection complete. Total rows: {len(df):,}")
+
+    # -- Save raw CSV --------------------------------------------------------
+    os.makedirs("output", exist_ok=True)
+    raw_csv_path = CONFIG["live_output_csv"]
+    df.to_csv(raw_csv_path, index=False)
+    print(f"  Raw collection saved -> {raw_csv_path}")
+
+    print("\n  [STAGE 1 LIVE COMPLETE]")
+    with pipeline_state_lock:
+        pipeline_state["status"] = "ready"
+        pipeline_state["last_updated"] = datetime.now()
+    return df
+
