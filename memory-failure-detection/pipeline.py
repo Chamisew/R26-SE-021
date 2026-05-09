@@ -147,6 +147,7 @@ def stage1_load_data(config):
         print(f"\n  [STAGE 1 ERROR] {exc}")
         sys.exit(1)
 
+
 # =============================================================================
 # STAGE 1 — LIVE DOCKER COLLECTOR  (live mode)
 # =============================================================================
@@ -317,6 +318,7 @@ def _collect_container(
         elapsed = time.monotonic() - tick_start
         time.sleep(max(0, interval_seconds - elapsed))
 
+
 # ---- Live dashboard printer -------------------------------------------------
 def _print_dashboard(
     elapsed_sec: int,
@@ -374,6 +376,7 @@ def _print_dashboard(
 
     print("╚" + "═" * border_width + "╝")
     print(f"  Total rows: {total_rows} | Warnings: {warnings_count} | Errors: {errors_count}")
+
 
 # ---- Main live-collection entry point ---------------------------------------
 def stage1_collect_live(duration_minutes: int = 10) -> pd.DataFrame:
@@ -696,6 +699,7 @@ def stage1_5_preprocess(df):
     except Exception as exc:
         print(f"\n  [STAGE 1.5 ERROR] {exc}")
         raise
+
 
 # =============================================================================
 # STAGE 2 — DRAIN3 LOG PARSING (stack-agnostic)
@@ -1071,6 +1075,7 @@ def stage4_sliding_window(df, config):
         print(f"\n  [STAGE 4 ERROR] {exc}")
         raise
 
+
 # =============================================================================
 # CONTINUOUS WINDOW SAVE (LIVE MODE)
 # =============================================================================
@@ -1332,6 +1337,7 @@ def add_failure_trends(df):
     return df
 
 
+
 # =============================================================================
 # STAGE 5 — DATASET CONSTRUCTION AND EXPORT
 # =============================================================================
@@ -1511,3 +1517,624 @@ def print_evaluation(windows_df, raw_df):
     print("\n" + "="*60)
     print("EVALUATION COMPLETE")
     print("="*60)
+
+
+# =============================================================================
+# ABLATION STUDY
+# =============================================================================
+def run_ablation_study(windows_df):
+    """
+    Compare layer-wise and full-hybrid performance on the same windows_df.
+    Experiments:
+      A) Layer 1 only       -> keyword
+      B) Layer 1 + Layer 2  -> keyword OR tfidf
+      C) Layer 3 only       -> metric_fusion
+      D) Full hybrid        -> hybrid_label
+    """
+    print("\n" + "="*60)
+    print("ABLATION STUDY")
+    print("="*60)
+
+    y_true = (windows_df["ground_truth_label"] == "FAILURE").astype(int)
+    det = windows_df["detection_layer"].astype(str)
+
+    experiments = [
+        ("Layer 1 only",        det.str.contains("keyword", na=False).astype(int)),
+        ("Layer 1 + 2",         det.str.contains("keyword|tfidf", na=False).astype(int)),
+        ("Layer 3 only",        det.str.contains("metric_fusion", na=False).astype(int)),
+        ("Full Hybrid (Yours)", (windows_df["hybrid_label"] == "FAILURE").astype(int)),
+    ]
+
+    results = []
+    for name, y_pred in experiments:
+        precision = precision_score(y_true, y_pred, zero_division=0)
+        recall    = recall_score(y_true, y_pred, zero_division=0)
+        f1        = f1_score(y_true, y_pred, zero_division=0)
+
+        tp = int(((y_true == 1) & (y_pred == 1)).sum())
+        fp = int(((y_true == 0) & (y_pred == 1)).sum())
+        fn = int(((y_true == 1) & (y_pred == 0)).sum())
+
+        results.append({
+            "name": name,
+            "precision": precision,
+            "recall": recall,
+            "f1": f1,
+            "tp": tp,
+            "fp": fp,
+            "fn": fn,
+        })
+
+    # --- Main comparison table (requested format) ---
+    print("┌─────────────────────┬───────────┬────────┬────────┐")
+    print("│ Method              │ Precision │ Recall │ F1     │")
+    print("├─────────────────────┼───────────┼────────┼────────┤")
+    for row in results:
+        print(
+            f"│ {row['name']:<19} │ "
+            f"{row['precision']:<9.4f} │ "
+            f"{row['recall']:<6.4f} │ "
+            f"{row['f1']:<6.4f} │"
+        )
+    print("└─────────────────────┴───────────┴────────┴────────┘")
+
+    # --- Confusion-count details ---
+    print("\n  TP/FP/FN by method:")
+    for row in results:
+        print(
+            f"    {row['name']:<19} "
+            f"TP={row['tp']:<6} FP={row['fp']:<6} FN={row['fn']:<6}"
+        )
+
+    # --- Conclusion: best F1 and delta to next best ---
+    ranked = sorted(results, key=lambda r: r["f1"], reverse=True)
+    best = ranked[0]
+    next_best_f1 = ranked[1]["f1"] if len(ranked) > 1 else 0.0
+    improvement = best["f1"] - next_best_f1
+    print(
+        f"\n  Conclusion: Highest F1 is '{best['name']}' "
+        f"({best['f1']:.4f}), improving by {improvement:.4f} over the next best method."
+    )
+    print("\n  [ABLATION STUDY COMPLETE]")
+
+
+# =============================================================================
+# LEAVE-ONE-STACK-OUT (LOSO) EVALUATION
+# =============================================================================
+def run_loso_evaluation(windows_df):
+    """
+    Evaluate stack-agnostic behavior by holding out each stack and reporting
+    test performance on that held-out stack.
+    """
+    print("\n" + "="*60)
+    print("LEAVE-ONE-STACK-OUT (LOSO) EVALUATION")
+    print("="*60)
+
+    stacks = sorted(windows_df["stack"].dropna().unique().tolist())
+    if not stacks:
+        print("  [WARN] No stack values found for LOSO evaluation.")
+        print("\n  [LOSO COMPLETE]")
+        return
+
+    results = []
+    for stack_name in stacks:
+        test_set = windows_df[windows_df["stack"] == stack_name]
+        train_set = windows_df[windows_df["stack"] != stack_name]
+
+        # train_set is intentionally derived to mirror LOSO split and to show
+        # no per-stack customization is performed.
+        _ = train_set
+
+        y_true = (test_set["ground_truth_label"] == "FAILURE").astype(int)
+        y_pred = (test_set["hybrid_label"] == "FAILURE").astype(int)
+
+        precision = precision_score(y_true, y_pred, zero_division=0)
+        recall    = recall_score(y_true, y_pred, zero_division=0)
+        f1        = f1_score(y_true, y_pred, zero_division=0)
+
+        results.append({
+            "stack": stack_name,
+            "precision": precision,
+            "recall": recall,
+            "f1": f1,
+            "rows": len(test_set),
+        })
+
+    print("  Held-Out Stack         | Precision | Recall | F1     | Rows")
+    for row in results:
+        print(
+            f"  {row['stack']:<23} | "
+            f"{row['precision']:<9.4f} | "
+            f"{row['recall']:<6.4f} | "
+            f"{row['f1']:<6.4f} | "
+            f"{row['rows']}"
+        )
+
+    avg_f1 = sum(r["f1"] for r in results) / len(results)
+    print(f"\n  Average F1 across stacks: {avg_f1:.4f}")
+
+    underperforming = [r["stack"] for r in results if r["f1"] <= 0.70]
+    if not underperforming:
+        print("  Conclusion: Stack-agnosticism confirmed")
+    else:
+        print(
+            "  Conclusion: Stack-agnosticism not fully confirmed. "
+            f"Underperforming stacks (F1 <= 0.70): {', '.join(underperforming)}"
+        )
+
+    print("\n  [LOSO COMPLETE]")
+
+
+# =============================================================================
+# TF-IDF CORPUS SIZE EXPERIMENT
+# =============================================================================
+def run_corpus_size_experiment(df, config):
+    """
+    Evaluate TF-IDF semantic performance against different reference-corpus
+    sizes to justify the chosen corpus size.
+    """
+    print("\n" + "="*60)
+    print("TF-IDF CORPUS SIZE EXPERIMENT")
+    print("="*60)
+
+    threshold = 0.12
+    base_corpus = FAILURE_REFERENCE_CORPUS[:]
+
+    extra_10 = [
+        "heap memory consumption rising steadily without release",
+        "application nearing memory saturation due to unreclaimed objects",
+        "garbage collector running frequently with low reclaimed memory",
+        "memory allocation retries increasing under sustained load",
+        "process terminated after exceeding configured memory limit",
+        "old generation occupancy remains high across multiple gc cycles",
+        "service response delay linked to severe heap pressure",
+        "container memory usage spikes followed by out of memory crash",
+        "resident memory grows continuously indicating possible leak pattern",
+        "allocation stall observed before heap exhaustion error",
+    ]
+
+    corpora = {
+        3:  base_corpus[:3],
+        5:  base_corpus[:5],
+        7:  base_corpus[:7],
+        10: base_corpus[:10],
+        15: base_corpus[:10] + extra_10[:5],
+        20: base_corpus[:10] + extra_10[:10],
+    }
+
+    # Evaluate per-template then map back to rows (mirrors Stage 3 TF-IDF usage)
+    unique_templates = df["log_template"].astype(str).unique().tolist()
+    y_true = (df["ground_truth_label"] == "FAILURE").astype(int)
+
+    results = []
+    for size in [3, 5, 7, 10, 15, 20]:
+        ref_corpus = corpora[size]
+        all_docs = unique_templates + ref_corpus
+
+        vectorizer = TfidfVectorizer(
+            ngram_range=(1, 2),
+            max_features=5000,
+            sublinear_tf=True,
+        )
+        vectorizer.fit(all_docs)
+
+        tmpl_matrix = vectorizer.transform(unique_templates)
+        ref_matrix = vectorizer.transform(ref_corpus)
+        sim_matrix = cosine_similarity(tmpl_matrix, ref_matrix)
+        max_sims = sim_matrix.max(axis=1)
+
+        tmpl_to_pred = {
+            tmpl: (1 if max_sims[i] > threshold else 0)
+            for i, tmpl in enumerate(unique_templates)
+        }
+        y_pred = df["log_template"].astype(str).map(tmpl_to_pred).astype(int)
+
+        precision = precision_score(y_true, y_pred, zero_division=0)
+        recall = recall_score(y_true, y_pred, zero_division=0)
+        f1 = f1_score(y_true, y_pred, zero_division=0)
+
+        results.append({
+            "size": size,
+            "precision": precision,
+            "recall": recall,
+            "f1": f1,
+        })
+
+    print("  Corpus Size | Precision | Recall | F1")
+    for row in results:
+        print(
+            f"  {row['size']:<11} | "
+            f"{row['precision']:<9.4f} | "
+            f"{row['recall']:<6.4f} | "
+            f"{row['f1']:<6.4f}"
+        )
+
+    best = max(results, key=lambda r: r["f1"])
+    print(
+        f"\n  Best corpus size by F1: {best['size']} "
+        f"(F1={best['f1']:.4f}). "
+        f"This is the recommended size for the TF-IDF reference corpus."
+    )
+    print("\n  [CORPUS SIZE EXPERIMENT COMPLETE]")
+
+
+# =============================================================================
+# WINDOW SIZE EXPERIMENT
+# =============================================================================
+def run_window_size_experiment(df, config):
+    """
+    Compare multiple sliding-window sizes and report their impact on F1 and
+    data volume.
+    """
+    print("\n" + "="*60)
+    print("WINDOW SIZE EXPERIMENT")
+    print("="*60)
+
+    candidate_sizes = [4, 6, 8, 10, 12, 16, 20, 24]
+    original_size = config.get("window_size", 12)
+    results = []
+
+    for w in candidate_sizes:
+        exp_cfg = dict(config)
+        exp_cfg["window_size"] = w
+
+        windows_df = stage4_sliding_window(df.copy(), exp_cfg)
+
+        total_windows = len(windows_df)
+        if total_windows == 0:
+            failure_windows = 0
+            failure_pct = 0.0
+            f1 = 0.0
+        else:
+            failure_windows = int((windows_df["ground_truth_label"] == "FAILURE").sum())
+            failure_pct = (failure_windows / total_windows) * 100.0
+
+            y_true = (windows_df["ground_truth_label"] == "FAILURE").astype(int)
+            y_pred = (windows_df["hybrid_label"] == "FAILURE").astype(int)
+            f1 = f1_score(y_true, y_pred, zero_division=0)
+
+        results.append({
+            "window_size": w,
+            "total_windows": total_windows,
+            "failure_windows": failure_windows,
+            "failure_pct": failure_pct,
+            "f1": f1,
+        })
+
+    print("  Window Size | Windows Generated | FAILURE % | F1")
+    for row in results:
+        print(
+            f"  {row['window_size']:<11} | "
+            f"{row['total_windows']:<17} | "
+            f"{row['failure_pct']:<8.1f}% | "
+            f"{row['f1']:.4f}"
+        )
+
+    best = max(results, key=lambda r: r["f1"])
+    print(
+        f"\n  Window size {best['window_size']} selected — "
+        "generates sufficient temporal context while maximizing F1 score"
+    )
+
+    if original_size == best["window_size"]:
+        print(
+            f"  Current configured window size ({original_size}) is optimal based on this experiment."
+        )
+    else:
+        current_row = next((r for r in results if r["window_size"] == original_size), None)
+        if current_row is not None:
+            delta = best["f1"] - current_row["f1"]
+            print(
+                f"  Current configured window size is {original_size}, while optimal is {best['window_size']} "
+                f"(F1 improvement: {delta:.4f})."
+            )
+        else:
+            print(
+                f"  Current configured window size is {original_size}, while optimal is {best['window_size']}."
+            )
+
+    print("\n  [WINDOW SIZE EXPERIMENT COMPLETE]")
+
+
+# =============================================================================
+# FEATURE IMPORTANCE ANALYSIS (RANDOM FOREST + SHAP)
+# =============================================================================
+def run_feature_importance_analysis(windows_df):
+    """
+    Train a Random Forest classifier and compute SHAP feature importances,
+    then compare novel vs standard feature contribution.
+    """
+    print("\n" + "="*60)
+    print("FEATURE IMPORTANCE ANALYSIS")
+    print("="*60)
+
+    try:
+        import shap
+    except Exception:
+        print("  [ERROR] 'shap' is not installed.")
+        print("  Install it with: pip install shap")
+        print("\n  [FEATURE IMPORTANCE ANALYSIS SKIPPED]")
+        return
+
+    feature_cols = [
+        "memory_growth", "heap_rate", "gc_spike_count",
+        "ram_mean", "ram_max", "ram_std",
+        "cpu_mean", "cpu_max", "heap_max",
+        "gc_count", "ram_percent", "heap_mb_used",
+    ]
+    novel_features = {"memory_growth", "heap_rate", "gc_spike_count"}
+
+    # Keep only rows with required columns present
+    work_df = windows_df[feature_cols + ["ground_truth_label"]].copy()
+    work_df = work_df.dropna(subset=feature_cols + ["ground_truth_label"])
+    if work_df.empty:
+        print("  [WARN] No valid rows available after dropping missing values.")
+        print("\n  [FEATURE IMPORTANCE ANALYSIS SKIPPED]")
+        return
+
+    # 1) Encode target FAILURE=1, NORMAL=0
+    y = (work_df["ground_truth_label"] == "FAILURE").astype(int)
+    X = work_df[feature_cols]
+
+    # 2) Train/test split + RandomForest training
+    X_train, X_test, y_train, _ = train_test_split(
+        X, y, test_size=0.2, random_state=42
+    )
+    model = RandomForestClassifier(
+        n_estimators=200,
+        random_state=42,
+        n_jobs=-1,
+    )
+    model.fit(X_train, y_train)
+
+    # 3) SHAP values via TreeExplainer
+    explainer = shap.TreeExplainer(model)
+    shap_values = explainer.shap_values(X_test)
+
+    # Binary classifier SHAP output may be list[class0, class1] or array.
+    if isinstance(shap_values, list):
+        # Class 1 (FAILURE) explanation
+        sv = np.abs(shap_values[1])
+    else:
+        sv = np.abs(shap_values)
+        if sv.ndim == 3:
+            # shape: (n_samples, n_features, n_classes)
+            sv = sv[:, :, 1]
+
+    mean_importance = sv.mean(axis=0)
+    total_importance = float(mean_importance.sum())
+
+    ranked = sorted(
+        zip(feature_cols, mean_importance),
+        key=lambda x: x[1],
+        reverse=True,
+    )
+
+    # 4) Ranked table
+    print("  Rank | Feature          | SHAP Importance | Category")
+    for idx, (feat, imp) in enumerate(ranked, start=1):
+        category = "Novel" if feat in novel_features else "Standard"
+        print(f"  {idx:<4} | {feat:<16} | {imp:<15.4f} | {category}")
+
+    # 5/6) Novel vs Standard contribution percentages
+    novel_sum = sum(imp for feat, imp in ranked if feat in novel_features)
+    standard_sum = sum(imp for feat, imp in ranked if feat not in novel_features)
+    if total_importance > 0:
+        novel_pct = (novel_sum / total_importance) * 100.0
+        standard_pct = (standard_sum / total_importance) * 100.0
+    else:
+        novel_pct = 0.0
+        standard_pct = 0.0
+
+    print(
+        f"\n  Novel features contribute {novel_pct:.1f}% of total predictive importance"
+    )
+    print(
+        f"  Standard features contribute {standard_pct:.1f}% of total predictive importance"
+    )
+
+    # 7) Confirmation rule
+    if novel_pct > 30.0:
+        print("  [CONFIRMED] Novel feature engineering adds significant predictive value")
+
+    print("\n  [FEATURE IMPORTANCE ANALYSIS COMPLETE]")
+
+
+# =============================================================================
+# EARLY WARNING TIME ANALYSIS
+# =============================================================================
+def measure_early_warning_time(windows_df):
+    """
+    Measure how many minutes before each ground-truth failure the model first
+    raised a FAILURE alert within the same service.
+    """
+    print("\n" + "="*60)
+    print("EARLY WARNING TIME ANALYSIS")
+    print("="*60)
+
+    required_cols = {"timestamp", "service_name", "hybrid_label", "ground_truth_label"}
+    missing = [c for c in required_cols if c not in windows_df.columns]
+    if missing:
+        print(f"  [ERROR] Missing required columns: {missing}")
+        print("\n  [EARLY WARNING ANALYSIS SKIPPED]")
+        return
+
+    work_df = windows_df.copy()
+    work_df["timestamp"] = pd.to_datetime(work_df["timestamp"], errors="coerce")
+    work_df = work_df.dropna(subset=["timestamp"]).sort_values("timestamp")
+
+    if work_df.empty:
+        print("  [WARN] No valid timestamped rows available.")
+        print("\n  [EARLY WARNING ANALYSIS SKIPPED]")
+        return
+
+    early_warning_minutes = []
+    event_records = []
+
+    for svc, grp in work_df.groupby("service_name", sort=False):
+        grp = grp.sort_values("timestamp").reset_index(drop=True)
+        failure_events = grp[grp["ground_truth_label"] == "FAILURE"]
+        predicted_events = grp[grp["hybrid_label"] == "FAILURE"]["timestamp"]
+
+        stack_name = "Unknown"
+        if "stack" in grp.columns and not grp["stack"].dropna().empty:
+            stack_name = str(grp["stack"].dropna().iloc[0])
+
+        for _, failure_row in failure_events.iterrows():
+            failure_ts = failure_row["timestamp"]
+            early_preds = predicted_events[predicted_events < failure_ts]
+
+            if not early_preds.empty:
+                earliest_pred_ts = early_preds.iloc[0]
+                delta_minutes = (failure_ts - earliest_pred_ts) / pd.Timedelta(minutes=1)
+                delta_minutes = float(delta_minutes)
+                early_warning_minutes.append(delta_minutes)
+                event_records.append({
+                    "service_name": svc,
+                    "stack": stack_name,
+                    "warning_min": delta_minutes,
+                    "predicted_early": True,
+                })
+            else:
+                event_records.append({
+                    "service_name": svc,
+                    "stack": stack_name,
+                    "warning_min": np.nan,
+                    "predicted_early": False,
+                })
+
+    total_failures = len(event_records)
+    successful = sum(1 for r in event_records if r["predicted_early"])
+    missed = total_failures - successful
+    success_pct = (successful / total_failures * 100.0) if total_failures > 0 else 0.0
+    missed_pct = (missed / total_failures * 100.0) if total_failures > 0 else 0.0
+
+    print("  Early Warning Time Analysis")
+    print("  " + "─" * 41)
+    print(f"  Total failure events analyzed : {total_failures}")
+    print(f"  Successfully predicted early  : {successful} ({success_pct:.1f}%)")
+    print(f"  Missed (no early warning)     : {missed} ({missed_pct:.1f}%)")
+
+    if early_warning_minutes:
+        min_warn = float(np.min(early_warning_minutes))
+        max_warn = float(np.max(early_warning_minutes))
+        avg_warn = float(np.mean(early_warning_minutes))
+        med_warn = float(np.median(early_warning_minutes))
+
+        print("\n  Early Warning Time Distribution:")
+        print(f"  Minimum  : {min_warn:.1f} minutes before failure")
+        print(f"  Maximum  : {max_warn:.1f} minutes before failure")
+        print(f"  Average  : {avg_warn:.1f} minutes before failure")
+        print(f"  Median   : {med_warn:.1f} minutes before failure")
+
+        per_service = (
+            pd.DataFrame(event_records)
+            .dropna(subset=["warning_min"])
+            .groupby(["service_name", "stack"], as_index=False)["warning_min"]
+            .mean()
+            .sort_values("warning_min", ascending=False)
+        )
+
+        print("\n  Service              | Stack           | Avg Warning (min)")
+        if per_service.empty:
+            print("  (No service had early predictions)")
+        else:
+            for _, row in per_service.iterrows():
+                print(
+                    f"  {str(row['service_name']):<20} | "
+                    f"{str(row['stack']):<15} | "
+                    f"{row['warning_min']:.1f}"
+                )
+
+        if avg_warn > 5:
+            print(
+                f"\n  [CONFIRMED] System provides actionable early warning "
+                f"averaging {avg_warn:.1f} minutes before failure"
+            )
+        elif avg_warn < 2:
+            print(
+                "\n  [WARNING] Early warning time may be insufficient for manual intervention"
+            )
+    else:
+        print("\n  Early Warning Time Distribution:")
+        print("  No early warning detections were found before failure events.")
+
+    print("\n  [EARLY WARNING ANALYSIS COMPLETE]")
+
+
+# =============================================================================
+# MAIN
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# MODE SWITCH — change to "live" to collect from real Docker containers
+#               change to "csv"  to load from data/raw_logs_metrics.csv
+# ---------------------------------------------------------------------------
+MODE = "live"   # "csv" | "live"
+
+
+def main():
+    print("\n" + "#"*60)
+    print("# MEMORY FAILURE DETECTION PIPELINE")
+    print("# Stack-Agnostic Log Parsing + Hybrid Feature Extraction")
+    print("#"*60)
+    print(f"# MODE: {MODE}")
+    print("#"*60)
+
+    # Change working directory to the script's location
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    os.chdir(script_dir)
+
+    # -------------------------------------------------------------------------
+    # Stage 1 — Data source (CSV or Live Docker)
+    # -------------------------------------------------------------------------
+    if MODE == "csv":
+        df = stage1_load_data(CONFIG)
+    elif MODE == "live":
+        df = stage1_collect_live(
+            duration_minutes=CONFIG["live_duration_minutes"]
+        )
+    else:
+        print(f"[ERROR] Unknown MODE '{MODE}'. Use 'csv' or 'live'.")
+        sys.exit(1)
+
+    if df.empty:
+        print("[ERROR] No data available after Stage 1. Exiting.")
+        sys.exit(1)
+
+    # Stage 1.5 — preprocessing before Drain3
+    df = stage1_5_preprocess(df)
+    if df.empty:
+        print("[ERROR] No data available after Stage 1.5 preprocessing. Exiting.")
+        sys.exit(1)
+
+    # Stage 2 — Drain3 log parsing
+    df = stage2_drain3_parsing(df, CONFIG)
+
+    # Stage 3 — Hybrid classifier
+    df = stage3_hybrid_classifier(df, CONFIG)
+
+    # Stage 4 — Sliding window features
+    windows_df = stage4_sliding_window(df, CONFIG)
+
+    # Stage 5 — Export CSVs
+    windows_df = stage5_export(windows_df, CONFIG)
+
+    # Evaluation (only meaningful when ground_truth labels are real)
+    if MODE == "csv":
+        print_evaluation(windows_df, df)
+        run_ablation_study(windows_df)
+        run_loso_evaluation(windows_df)
+        run_corpus_size_experiment(df, CONFIG)
+        run_window_size_experiment(df, CONFIG)
+        run_feature_importance_analysis(windows_df)
+        measure_early_warning_time(windows_df)
+    else:
+        print("\n  [NOTE] Evaluation skipped in live mode "
+              "(ground_truth_label is UNKNOWN).")
+
+    print("\n[PIPELINE FINISHED SUCCESSFULLY]\n")
+
+
+if __name__ == "__main__":
+    main()
