@@ -1,0 +1,749 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Memory Usage Predictor</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --card: #1e293b;
+      --border: #334155;
+      --text: #f1f5f9;
+      --muted: #94a3b8;
+      --accent: #3b82f6;
+      --danger: #ef4444;
+      --success: #22c55e;
+      --warn: #f59e0b;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'Segoe UI', sans-serif;
+      font-size: 14px;
+    }
+
+    header {
+      background: var(--card);
+      border-bottom: 1px solid var(--border);
+      padding: 14px 24px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    header h1 {
+      font-size: 16px;
+      font-weight: 700;
+      color: var(--accent);
+    }
+
+    header span {
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .container {
+      padding: 20px 24px;
+      max-width: 1600px;
+      margin: 0 auto;
+    }
+
+    /* Alert banner */
+    #alert-banner {
+      display: none;
+      background: var(--danger);
+      color: #fff;
+      padding: 14px 20px;
+      border-radius: 8px;
+      margin-bottom: 16px;
+      position: relative;
+      animation: pulse 1s infinite alternate;
+    }
+
+    #alert-banner h3 {
+      font-size: 15px;
+      margin-bottom: 6px;
+    }
+
+    #alert-banner p {
+      font-size: 13px;
+      line-height: 1.6;
+    }
+
+    #alert-banner .close-btn {
+      position: absolute;
+      top: 10px;
+      right: 14px;
+      cursor: pointer;
+      font-size: 18px;
+      font-weight: bold;
+    }
+
+    @keyframes pulse {
+      from {
+        opacity: 1;
+      }
+
+      to {
+        opacity: 0.85;
+      }
+    }
+
+    /* KPI cards */
+    .kpi-row {
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      gap: 14px;
+      margin-bottom: 20px;
+    }
+
+    .kpi-card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 16px;
+    }
+
+    .kpi-card .label {
+      font-size: 11px;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-bottom: 6px;
+    }
+
+    .kpi-card .value {
+      font-size: 26px;
+      font-weight: 700;
+    }
+
+    .kpi-card .sub {
+      font-size: 11px;
+      color: var(--muted);
+      margin-top: 4px;
+    }
+
+    .kpi-card.danger .value {
+      color: var(--danger);
+    }
+
+    .kpi-card.success .value {
+      color: var(--success);
+    }
+
+    .kpi-card.accent .value {
+      color: var(--accent);
+    }
+
+    /* Charts row */
+    .charts-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+      margin-bottom: 20px;
+    }
+
+    .chart-card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 16px;
+    }
+
+    .chart-card h2 {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--muted);
+      margin-bottom: 12px;
+    }
+
+    .chart-card canvas {
+      max-height: 220px;
+    }
+
+    /* Bottom panels */
+    .bottom-row {
+      display: grid;
+      grid-template-columns: 2fr 1fr 1fr;
+      gap: 16px;
+      margin-bottom: 20px;
+    }
+
+    .panel {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 16px;
+    }
+
+    .panel h2 {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--muted);
+      margin-bottom: 10px;
+    }
+
+    /* Table */
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 12px;
+    }
+
+    th {
+      color: var(--muted);
+      font-weight: 600;
+      text-align: left;
+      padding: 6px 8px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    td {
+      padding: 6px 8px;
+      border-bottom: 1px solid #1e293b;
+    }
+
+    tr:hover td {
+      background: #1e3a5f22;
+    }
+
+    .pill {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 999px;
+      font-size: 11px;
+      font-weight: 600;
+    }
+
+    .pill.failure {
+      background: #ef444422;
+      color: var(--danger);
+      border: 1px solid var(--danger);
+    }
+
+    .pill.normal {
+      background: #22c55e22;
+      color: var(--success);
+      border: 1px solid var(--success);
+    }
+
+    .pill.warning {
+      background: #f59e0b22;
+      color: var(--warn);
+      border: 1px solid var(--warn);
+    }
+
+    /* Services Health */
+    .health-section {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 16px;
+      margin-bottom: 20px;
+    }
+
+    .health-section h2 {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--muted);
+      margin-bottom: 10px;
+    }
+
+    /* LOPO bars */
+    .lopo-bar-wrap {
+      margin-bottom: 8px;
+    }
+
+    .lopo-bar-label {
+      display: flex;
+      justify-content: space-between;
+      font-size: 11px;
+      color: var(--muted);
+      margin-bottom: 2px;
+    }
+
+    .lopo-bar-bg {
+      background: #334155;
+      border-radius: 4px;
+      height: 10px;
+    }
+
+    .lopo-bar-fill {
+      height: 10px;
+      border-radius: 4px;
+      background: var(--success);
+      transition: width 0.5s;
+    }
+
+    /* Alert history */
+    .alert-item {
+      background: #ef444415;
+      border: 1px solid #ef444440;
+      border-radius: 6px;
+      padding: 8px 10px;
+      margin-bottom: 7px;
+      font-size: 12px;
+    }
+
+    .alert-item .svc {
+      font-weight: 600;
+      color: var(--danger);
+    }
+
+    .alert-item .detail {
+      color: var(--muted);
+      margin-top: 2px;
+    }
+
+    .download-btn {
+      display: inline-block;
+      padding: 8px 16px;
+      background: var(--accent);
+      color: #fff;
+      border-radius: 6px;
+      font-size: 12px;
+      font-weight: 600;
+      text-decoration: none;
+      cursor: pointer;
+      border: none;
+    }
+
+    .download-btn:hover {
+      background: #2563eb;
+    }
+
+    #status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--success);
+      display: inline-block;
+      margin-right: 6px;
+      animation: blink 1.5s infinite;
+    }
+
+    @keyframes blink {
+
+      0%,
+      100% {
+        opacity: 1;
+      }
+
+      50% {
+        opacity: 0.3;
+      }
+    }
+
+    .model-not-ready {
+      color: var(--warn);
+      text-align: center;
+      padding: 30px;
+    }
+
+    .scroll-table {
+      max-height: 280px;
+      overflow-y: auto;
+    }
+
+    .scroll-alerts {
+      max-height: 260px;
+      overflow-y: auto;
+    }
+
+    .btn-small {
+      display: inline-block;
+      padding: 4px 8px;
+      background: transparent;
+      color: var(--muted);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      font-size: 11px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .btn-small:hover {
+      color: var(--text);
+      border-color: var(--muted);
+    }
+  </style>
+</head>
+
+<body>
+
+  <header>
+    <div style="display: flex; align-items: center; gap: 12px;">
+      <h1>&#9888; Memory Usage Predictor</h1>
+      <button id="notif-btn" class="btn-small" onclick="requestNotifUserGesture()">🔔 Enable Browser Alerts</button>
+    </div>
+    <span><span id="status-dot"></span><span id="status-text">Connecting...</span> &nbsp;|&nbsp; Updated every 2s</span>
+  </header>
+
+  <div class="container">
+
+    <!-- Alert Banner -->
+    <div id="alert-banner">
+      <span class="close-btn" onclick="document.getElementById('alert-banner').style.display='none'">&#10005;</span>
+      <h3>&#128680; FAILURE DETECTED</h3>
+      <p id="alert-banner-text"></p>
+    </div>
+
+    <!-- KPI Cards -->
+    <div class="kpi-row">
+      <div class="kpi-card accent">
+        <div class="label">Best Model</div>
+        <div class="value" id="kpi-model" style="font-size:18px;">--</div>
+      </div>
+      <div class="kpi-card">
+        <div class="label">Rows Seen</div>
+        <div class="value" id="kpi-rows">0</div>
+        <div class="sub">live predictions</div>
+      </div>
+      <div class="kpi-card danger">
+        <div class="label">Alerts (total)</div>
+        <div class="value" id="kpi-alerts">0</div>
+        <div class="sub">prob &ge; 0.6</div>
+      </div>
+      <div class="kpi-card success">
+        <div class="label">Mean LOPO F1</div>
+        <div class="value" id="kpi-f1">--</div>
+        <div class="sub">target &ge; 0.75</div>
+      </div>
+      <div class="kpi-card">
+        <div class="label">F1 Variance</div>
+        <div class="value" id="kpi-var">--</div>
+        <div class="sub">target &lt; 0.10</div>
+      </div>
+    </div>
+
+    <!-- Charts row -->
+    <div class="charts-row">
+      <div class="chart-card">
+        <h2>Memory / Failure Probability (live)</h2>
+        <canvas id="prob-chart"></canvas>
+      </div>
+      <div class="chart-card">
+        <h2>&#10084;&#65039; Services Health Overview <span id="health-summary" style="font-size:11px;font-weight:400;margin-left:8px;"></span></h2>
+        <div class="scroll-table" style="max-height:210px;">
+          <table>
+            <thead>
+              <tr>
+                <th>Service</th>
+                <th>Project</th>
+                <th>Time</th>
+                <th>Prob</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody id="health-table-body">
+              <tr><td colspan="5" style="color:var(--muted);text-align:center">Waiting for live data...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- Bottom row -->
+    <div class="bottom-row">
+      <!-- Predictions table -->
+      <div class="panel">
+        <h2>Latest Predictions</h2>
+        <div class="scroll-table">
+          <table>
+            <thead>
+              <tr>
+                <th>Time</th>
+                <th>Service</th>
+                <th>Project</th>
+                <th>Prob</th>
+                <th>Label</th>
+              </tr>
+            </thead>
+            <tbody id="pred-table-body">
+              <tr>
+                <td colspan="5" style="color:var(--muted);text-align:center">Waiting for live data...</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <br />
+        <button class="download-btn" onclick="window.location='/api/download'">&#11015; Download CSV (Component
+          4)</button>
+      </div>
+
+      <!-- LOPO bars -->
+      <div class="panel">
+        <h2>LOPO F1 Results</h2>
+        <div id="lopo-bars">Loading...</div>
+      </div>
+
+      <!-- Alert history -->
+      <div class="panel">
+        <h2>&#128680; Recent Failures</h2>
+        <div class="scroll-alerts" id="alert-history">
+          <div style="color:var(--muted);font-size:12px">No failures detected yet.</div>
+        </div>
+      </div>
+    </div>
+
+  </div><!-- /container -->
+
+  <script>
+    // ── State ─────────────────────────────────────────────────────────────────
+    let probHistory = [];
+    let totalAlerts = 0;
+    let totalRows = 0;
+    let probChart = null;
+    let lastAlertKey = null;
+    let serviceHealth = {};
+
+    // ── Probability Chart ──────────────────────────────────────────────────────
+    function initProbChart() {
+      const ctx = document.getElementById('prob-chart').getContext('2d');
+      probChart = new Chart(ctx, {
+        type: 'line',
+        data: {
+          labels: [],
+          datasets: [{
+            label: 'Failure Probability',
+            data: [],
+            borderColor: '#3b82f6',
+            backgroundColor: 'rgba(59,130,246,0.1)',
+            borderWidth: 2,
+            pointRadius: 2,
+            tension: 0.3,
+            fill: true
+          }]
+        },
+        options: {
+          responsive: true, maintainAspectRatio: true,
+          plugins: {
+            legend: { display: false },
+            annotation: {}
+          },
+          scales: {
+            x: { display: false },
+            y: {
+              min: 0, max: 1,
+              ticks: { color: '#94a3b8', stepSize: 0.2 },
+              grid: { color: '#334155' }
+            }
+          }
+        },
+        plugins: [{
+          id: 'threshold',
+          afterDraw(chart) {
+            const { ctx, chartArea: { left, right, top, bottom }, scales: { y } } = chart;
+            const yPx = y.getPixelForValue(0.6);
+            ctx.save();
+            ctx.beginPath();
+            ctx.moveTo(left, yPx); ctx.lineTo(right, yPx);
+            ctx.strokeStyle = '#ef4444';
+            ctx.lineWidth = 1.5;
+            ctx.setLineDash([5, 4]);
+            ctx.stroke();
+            ctx.fillStyle = '#ef4444';
+            ctx.font = '10px sans-serif';
+            ctx.fillText('Alert 0.6', right - 54, yPx - 4);
+            ctx.restore();
+          }
+        }]
+      });
+    }
+
+    // ── Poll Live Data ─────────────────────────────────────────────────────────
+    async function pollLive() {
+      try {
+        const res = await fetch('/api/live');
+        const data = await res.json();
+        if (data.error) {
+          document.getElementById('status-text').textContent = data.error;
+          return;
+        }
+
+        document.getElementById('status-text').textContent = 'Live';
+        document.getElementById('kpi-model').textContent = data.best_model || 'N/A';
+        document.getElementById('kpi-rows').textContent = data.rows_seen || 0;
+        document.getElementById('kpi-f1').textContent = data.mean_f1 !== undefined ? data.mean_f1.toFixed(4) : '--';
+        document.getElementById('kpi-var').textContent = data.f1_variance !== undefined ? data.f1_variance.toFixed(6) : '--';
+
+        const rows = data.rows || [];
+        // Update prob chart and service health map
+        rows.forEach(r => {
+          probHistory.push(r.memory_prob);
+          if (probHistory.length > 60) probHistory.shift();
+          serviceHealth[r.service_name] = {
+            project_id: r.project_id,
+            memory_prob: r.memory_prob,
+            timestamp: r.timestamp.slice(11, 19)
+          };
+        });
+        probChart.data.labels = probHistory.map((_, i) => i);
+        probChart.data.datasets[0].data = probHistory;
+        probChart.update('none');
+
+        // Render services health table
+        const entries = Object.entries(serviceHealth);
+        if (entries.length > 0) {
+          let healthy = 0, warning = 0, critical = 0;
+          const healthRows = entries.map(([svc, info]) => {
+            let cls = 'normal', label = 'HEALTHY';
+            if (info.memory_prob >= 0.6)      { cls = 'failure'; label = 'CRITICAL'; critical++; }
+            else if (info.memory_prob >= 0.4) { cls = 'warning'; label = 'WARNING';  warning++;  }
+            else                              { healthy++; }
+            const probColor = cls === 'failure' ? 'var(--danger)' : (cls === 'warning' ? 'var(--warn)' : 'var(--success)');
+            return `<tr>
+              <td style="font-weight:600">${svc}</td>
+              <td>${info.project_id}</td>
+              <td style="color:var(--muted)">${info.timestamp}</td>
+              <td style="font-weight:600;color:${probColor}">${info.memory_prob.toFixed(3)}</td>
+              <td><span class="pill ${cls}">${label}</span></td>
+            </tr>`;
+          });
+          document.getElementById('health-table-body').innerHTML = healthRows.join('');
+          document.getElementById('health-summary').innerHTML =
+            `<span style="color:var(--success)">${healthy} Healthy</span> &nbsp;
+             <span style="color:var(--warn)">${warning} Warning</span> &nbsp;
+             <span style="color:var(--danger)">${critical} Critical</span>`;
+        }
+
+        // Count alerts & show banner
+        const alertRows = rows.filter(r => r.alert);
+        if (alertRows.length > 0) {
+          totalAlerts += alertRows.length;
+          document.getElementById('kpi-alerts').textContent = totalAlerts;
+          const latest = alertRows[alertRows.length - 1];
+          const key = latest.timestamp + latest.service_name;
+          if (key !== lastAlertKey) {
+            lastAlertKey = key;
+            showAlertBanner(latest);
+            tryBrowserNotification(latest);
+          }
+        }
+
+        // Update table
+        const tbody = document.getElementById('pred-table-body');
+        if (rows.length > 0) {
+          tbody.innerHTML = rows.slice(-20).reverse().map(r => `
+        <tr>
+          <td style="color:var(--muted)">${r.timestamp.slice(11, 19)}</td>
+          <td>${r.service_name}</td>
+          <td>${r.project_id}</td>
+          <td style="font-weight:600;color:${r.alert ? 'var(--danger)' : 'var(--success)'}">
+            ${r.memory_prob.toFixed(3)}</td>
+          <td><span class="pill ${r.alert ? 'failure' : 'normal'}">${r.pred_label}</span></td>
+        </tr>`).join('');
+        }
+      } catch (e) {
+        document.getElementById('status-text').textContent = 'Connection error';
+      }
+    }
+
+    // ── LOPO Bars ──────────────────────────────────────────────────────────────
+    async function loadLopo() {
+      try {
+        const res = await fetch('/api/lopo');
+        const data = await res.json();
+        const container = document.getElementById('lopo-bars');
+        if (!data || data.length === 0) { container.innerHTML = '<div style="color:var(--muted)">Run compare_models.py first</div>'; return; }
+        container.innerHTML = data.map(d => `
+      <div class="lopo-bar-wrap">
+        <div class="lopo-bar-label">
+          <span>${d.project}</span>
+          <span style="color:${d.f1 >= 0.75 ? 'var(--success)' : 'var(--warn)'}">F1=${d.f1}</span>
+        </div>
+        <div class="lopo-bar-bg">
+          <div class="lopo-bar-fill" style="width:${Math.round(d.f1 * 100)}%;background:${d.f1 >= 0.75 ? 'var(--success)' : 'var(--warn)'}"></div>
+        </div>
+      </div>`).join('');
+      } catch (e) { }
+    }
+
+    // ── Alert History ──────────────────────────────────────────────────────────
+    async function pollAlerts() {
+      try {
+        const res = await fetch('/api/alerts');
+        const data = await res.json();
+        const alerts = data.alerts || [];
+        const container = document.getElementById('alert-history');
+        if (alerts.length === 0) {
+          container.innerHTML = '<div style="color:var(--muted);font-size:12px">No failures detected yet.</div>';
+        } else {
+          container.innerHTML = alerts.slice(0, 15).map(a => `
+        <div class="alert-item">
+          <div class="svc">&#9888; ${a.service_name} <span style="color:var(--muted);font-weight:400">(${a.project_id})</span></div>
+          <div class="detail">Prob: ${(a.memory_prob * 100).toFixed(0)}% &nbsp;|&nbsp; ${a.timestamp}</div>
+        </div>`).join('');
+        }
+      } catch (e) { }
+    }
+
+    // ── Alert Banner ──────────────────────────────────────────────────────────
+    let bannerTimer = null;
+    function showAlertBanner(row) {
+      const banner = document.getElementById('alert-banner');
+      document.getElementById('alert-banner-text').innerHTML =
+        `Service: <b>${row.service_name}</b> &nbsp;|&nbsp; Project: <b>${row.project_id}</b> &nbsp;|&nbsp; Probability: <b>${(row.memory_prob * 100).toFixed(0)}%</b><br/>
+     Mem Growth: ${row.memory_change_5min.toFixed(4)} &nbsp;|&nbsp; RAM Mean: ${row.ram_mean.toFixed(2)} &nbsp;|&nbsp; Time: ${row.timestamp}`;
+      banner.style.display = 'block';
+      if (bannerTimer) clearTimeout(bannerTimer);
+      bannerTimer = setTimeout(() => { banner.style.display = 'none'; }, 15000);
+    }
+
+    // ── Browser Notification ──────────────────────────────────────────────────
+    let notifPermission = false;
+    function requestNotifPermission() {
+      if ('Notification' in window) {
+        if (Notification.permission === 'granted') {
+          notifPermission = true;
+          document.getElementById('notif-btn').style.display = 'none';
+        }
+      }
+    }
+    function requestNotifUserGesture() {
+      if ('Notification' in window) {
+        Notification.requestPermission().then(p => {
+          notifPermission = p === 'granted';
+          if (notifPermission) {
+            document.getElementById('notif-btn').style.display = 'none';
+            new Notification('Alerts Enabled', { body: 'You will now receive browser notifications for memory leaks.' });
+          } else {
+            alert('Browser notification permission denied.');
+          }
+        });
+      }
+    }
+    function tryBrowserNotification(row) {
+      if (!notifPermission || !('Notification' in window)) return;
+      new Notification('🌐 Dashboard: Predictive Alert', {
+        body: `Anomaly detected in ${row.service_name} (Proj: ${row.project_id})\nFailure Probability: ${(row.memory_prob * 100).toFixed(0)}%\nView the dashboard for detailed metrics.`,
+        icon: ''
+      });
+    }
+
+    // ── Init ──────────────────────────────────────────────────────────────────
+    document.addEventListener('DOMContentLoaded', () => {
+      initProbChart();
+      requestNotifPermission();
+      loadLopo();
+
+      // Poll intervals
+      pollLive();
+      setInterval(pollLive, 2000);
+      setInterval(pollAlerts, 3000);
+    });
+  </script>
+</body>
+
+</html>
