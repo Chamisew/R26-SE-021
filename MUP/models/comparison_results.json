@@ -1,0 +1,382 @@
+[
+  {
+    "model": "Random Forest",
+    "mean_f1": 0.9775,
+    "f1_var": 2.6e-05,
+    "mean_prec": 1.0,
+    "mean_rec": 0.956,
+    "mean_auc": 0.9877,
+    "train_sec": 45.5,
+    "folds": [
+      {
+        "project": "project_1",
+        "f1": 0.9777,
+        "precision": 1.0,
+        "recall": 0.9564,
+        "auc": 0.9742
+      },
+      {
+        "project": "project_10",
+        "f1": 0.9739,
+        "precision": 1.0,
+        "recall": 0.9492,
+        "auc": 0.9837
+      },
+      {
+        "project": "project_2",
+        "f1": 0.9703,
+        "precision": 1.0,
+        "recall": 0.9423,
+        "auc": 0.9957
+      },
+      {
+        "project": "project_3",
+        "f1": 0.9739,
+        "precision": 1.0,
+        "recall": 0.9491,
+        "auc": 0.9961
+      },
+      {
+        "project": "project_4",
+        "f1": 0.9739,
+        "precision": 1.0,
+        "recall": 0.9492,
+        "auc": 0.9848
+      },
+      {
+        "project": "project_6",
+        "f1": 0.9779,
+        "precision": 1.0,
+        "recall": 0.9568,
+        "auc": 0.988
+      },
+      {
+        "project": "project_7",
+        "f1": 0.9846,
+        "precision": 1.0,
+        "recall": 0.9697,
+        "auc": 0.9744
+      },
+      {
+        "project": "project_8",
+        "f1": 0.978,
+        "precision": 1.0,
+        "recall": 0.9569,
+        "auc": 0.9924
+      },
+      {
+        "project": "project_9",
+        "f1": 0.987,
+        "precision": 1.0,
+        "recall": 0.9744,
+        "auc": 0.9998
+      }
+    ]
+  },
+  {
+    "model": "Gradient Boosting",
+    "mean_f1": 0.9767,
+    "f1_var": 4.8e-05,
+    "mean_prec": 0.9969,
+    "mean_rec": 0.9573,
+    "mean_auc": 0.9933,
+    "train_sec": 36.1,
+    "folds": [
+      {
+        "project": "project_1",
+        "f1": 0.9777,
+        "precision": 1.0,
+        "recall": 0.9564,
+        "auc": 0.9894
+      },
+      {
+        "project": "project_10",
+        "f1": 0.9741,
+        "precision": 0.9941,
+        "recall": 0.9548,
+        "auc": 0.9944
+      },
+      {
+        "project": "project_2",
+        "f1": 0.9703,
+        "precision": 1.0,
+        "recall": 0.9423,
+        "auc": 0.9929
+      },
+      {
+        "project": "project_3",
+        "f1": 0.9739,
+        "precision": 1.0,
+        "recall": 0.9491,
+        "auc": 0.9957
+      },
+      {
+        "project": "project_4",
+        "f1": 0.9632,
+        "precision": 0.9777,
+        "recall": 0.9492,
+        "auc": 0.9877
+      },
+      {
+        "project": "project_6",
+        "f1": 0.9811,
+        "precision": 1.0,
+        "recall": 0.963,
+        "auc": 0.9944
+      },
+      {
+        "project": "project_7",
+        "f1": 0.9846,
+        "precision": 1.0,
+        "recall": 0.9697,
+        "auc": 0.9914
+      },
+      {
+        "project": "project_8",
+        "f1": 0.978,
+        "precision": 1.0,
+        "recall": 0.9569,
+        "auc": 0.9938
+      },
+      {
+        "project": "project_9",
+        "f1": 0.987,
+        "precision": 1.0,
+        "recall": 0.9744,
+        "auc": 0.9996
+      }
+    ]
+  },
+  {
+    "model": "Decision Tree",
+    "mean_f1": 0.9588,
+    "f1_var": 0.000187,
+    "mean_prec": 0.9583,
+    "mean_rec": 0.9603,
+    "mean_auc": 0.9753,
+    "train_sec": 0.6,
+    "folds": [
+      {
+        "project": "project_1",
+        "f1": 0.9693,
+        "precision": 0.9764,
+        "recall": 0.9622,
+        "auc": 0.9774
+      },
+      {
+        "project": "project_10",
+        "f1": 0.9465,
+        "precision": 0.9438,
+        "recall": 0.9492,
+        "auc": 0.9667
+      },
+      {
+        "project": "project_2",
+        "f1": 0.9703,
+        "precision": 1.0,
+        "recall": 0.9423,
+        "auc": 0.9712
+      },
+      {
+        "project": "project_3",
+        "f1": 0.9608,
+        "precision": 0.9729,
+        "recall": 0.9491,
+        "auc": 0.9676
+      },
+      {
+        "project": "project_4",
+        "f1": 0.9639,
+        "precision": 0.979,
+        "recall": 0.9492,
+        "auc": 0.9698
+      },
+      {
+        "project": "project_6",
+        "f1": 0.9538,
+        "precision": 0.9509,
+        "recall": 0.9568,
+        "auc": 0.9704
+      },
+      {
+        "project": "project_7",
+        "f1": 0.9275,
+        "precision": 0.8889,
+        "recall": 0.9697,
+        "auc": 0.9806
+      },
+      {
+        "project": "project_8",
+        "f1": 0.9743,
+        "precision": 0.984,
+        "recall": 0.9647,
+        "auc": 0.9797
+      },
+      {
+        "project": "project_9",
+        "f1": 0.963,
+        "precision": 0.9286,
+        "recall": 1.0,
+        "auc": 0.9944
+      }
+    ]
+  },
+  {
+    "model": "Logistic Regression",
+    "mean_f1": 0.9527,
+    "f1_var": 0.000585,
+    "mean_prec": 0.9526,
+    "mean_rec": 0.9556,
+    "mean_auc": 0.9933,
+    "train_sec": 0.4,
+    "folds": [
+      {
+        "project": "project_1",
+        "f1": 0.9732,
+        "precision": 0.997,
+        "recall": 0.9506,
+        "auc": 0.9967
+      },
+      {
+        "project": "project_10",
+        "f1": 0.954,
+        "precision": 0.9708,
+        "recall": 0.9379,
+        "auc": 0.9898
+      },
+      {
+        "project": "project_2",
+        "f1": 0.9703,
+        "precision": 1.0,
+        "recall": 0.9423,
+        "auc": 0.9883
+      },
+      {
+        "project": "project_3",
+        "f1": 0.9664,
+        "precision": 0.9825,
+        "recall": 0.9509,
+        "auc": 0.9967
+      },
+      {
+        "project": "project_4",
+        "f1": 0.8953,
+        "precision": 0.8217,
+        "recall": 0.9835,
+        "auc": 0.9963
+      },
+      {
+        "project": "project_6",
+        "f1": 0.9657,
+        "precision": 0.9748,
+        "recall": 0.9568,
+        "auc": 0.9887
+      },
+      {
+        "project": "project_7",
+        "f1": 0.9275,
+        "precision": 0.8889,
+        "recall": 0.9697,
+        "auc": 0.9908
+      },
+      {
+        "project": "project_8",
+        "f1": 0.9533,
+        "precision": 0.9874,
+        "recall": 0.9216,
+        "auc": 0.9927
+      },
+      {
+        "project": "project_9",
+        "f1": 0.9686,
+        "precision": 0.9506,
+        "recall": 0.9872,
+        "auc": 0.9994
+      }
+    ]
+  },
+  {
+    "model": "KNN",
+    "mean_f1": 0.9206,
+    "f1_var": 0.000929,
+    "mean_prec": 0.9477,
+    "mean_rec": 0.8991,
+    "mean_auc": 0.9695,
+    "train_sec": 1.1,
+    "folds": [
+      {
+        "project": "project_1",
+        "f1": 0.8846,
+        "precision": 0.9857,
+        "recall": 0.8023,
+        "auc": 0.9462
+      },
+      {
+        "project": "project_10",
+        "f1": 0.9443,
+        "precision": 0.9817,
+        "recall": 0.9096,
+        "auc": 0.9699
+      },
+      {
+        "project": "project_2",
+        "f1": 0.8596,
+        "precision": 0.7903,
+        "recall": 0.9423,
+        "auc": 0.9897
+      },
+      {
+        "project": "project_3",
+        "f1": 0.9427,
+        "precision": 0.9896,
+        "recall": 0.9,
+        "auc": 0.9657
+      },
+      {
+        "project": "project_4",
+        "f1": 0.9283,
+        "precision": 0.9531,
+        "recall": 0.9047,
+        "auc": 0.9623
+      },
+      {
+        "project": "project_6",
+        "f1": 0.9393,
+        "precision": 0.9735,
+        "recall": 0.9074,
+        "auc": 0.965
+      },
+      {
+        "project": "project_7",
+        "f1": 0.8955,
+        "precision": 0.8824,
+        "recall": 0.9091,
+        "auc": 0.9811
+      },
+      {
+        "project": "project_8",
+        "f1": 0.9448,
+        "precision": 0.9872,
+        "recall": 0.9059,
+        "auc": 0.9703
+      },
+      {
+        "project": "project_9",
+        "f1": 0.9467,
+        "precision": 0.9861,
+        "recall": 0.9103,
+        "auc": 0.9755
+      }
+    ]
+  },
+  {
+    "model": "XGBoost",
+    "mean_f1": 0.0,
+    "f1_var": 0.0,
+    "mean_prec": 0.0,
+    "mean_rec": 0.0,
+    "mean_auc": 0.0,
+    "train_sec": 0.1,
+    "folds": []
+  }
+]
