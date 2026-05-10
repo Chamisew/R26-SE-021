@@ -1,0 +1,44 @@
+# Environments
+venv/
+.env
+__pycache__/
+*.pyc
+
+# Data & Research Output
+research_framework/final_research_dataset.csv
+research_framework/ml_ready_dataset.csv
+*.csv
+*.log
+
+# Node.js
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Go
+service-go/service-go
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Ruby
+.bundle/
+vendor/bundle
+*.gem
+.target/
+
+# PHP
+vendor/
+.phpunit.result.cache
+
+# IDEs & System
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Docker
+.docker/
