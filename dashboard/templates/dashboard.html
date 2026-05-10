@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CPU Spike Predictor — Live</title>
+<link rel="stylesheet" href="/static/style.css">
+<script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+</head>
+<body>
+
+<!-- ── HEADER ─────────────────────────────────────────────────── -->
+<header>
+  <div class="header-left">
+    <span class="logo">CPU Spike Predictor</span>
+    <span class="badge-live" id="conn-badge">● CONNECTING</span>
+  </div>
+  <div class="header-right">
+    <span class="meta">Model: <strong id="hdr-model">{{ model_name }}</strong></span>
+    <span class="meta">Threshold: <strong>{{ threshold }}</strong></span>
+    <span class="meta" id="hdr-time">—</span>
+  </div>
+</header>
+
+<!-- ── ALARM BANNER ───────────────────────────────────────────── -->
+<div id="alarm-banner" class="alarm-banner hidden">
+  <div class="alarm-inner">
+    <div class="alarm-icon">⚠️</div>
+    <div class="alarm-body">
+      <div class="alarm-title" id="alarm-title">CPU spike imminent</div>
+      <div class="alarm-detail" id="alarm-detail">—</div>
+    </div>
+    <div class="alarm-metrics">
+      <div class="alarm-metric">
+        <div class="alarm-metric-value" id="alarm-prob">—</div>
+        <div class="alarm-metric-label">FAILURE PROB</div>
+      </div>
+      <div class="alarm-metric">
+        <div class="alarm-metric-value" id="alarm-time">—</div>
+        <div class="alarm-metric-label">ESTIMATED WARNING</div>
+      </div>
+      <div class="alarm-metric">
+        <div class="alarm-metric-value" id="alarm-cpu">—</div>
+        <div class="alarm-metric-label">CURRENT CPU</div>
+      </div>
+    </div>
+    <div class="alarm-actions">
+      <button class="btn-alarm btn-restart" onclick="handleAlarm('restart')">Restart now</button>
+      <button class="btn-alarm btn-shed" onclick="handleAlarm('shed')">Shed load</button>
+      <button class="btn-alarm btn-dismiss" onclick="handleAlarm('dismiss')">Dismiss</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── SUMMARY STATS ──────────────────────────────────────────── -->
+<section class="stats-row">
+  <div class="stat-card">
+    <div class="stat-label">Services Monitored</div>
+    <div class="stat-value" id="stat-services">0</div>
+  </div>
+  <div class="stat-card danger" id="stat-alarm-card">
+    <div class="stat-label">In Alarm</div>
+    <div class="stat-value" id="stat-alarm">0</div>
+  </div>
+  <div class="stat-card warning" id="stat-watch-card">
+    <div class="stat-label">In Watch</div>
+    <div class="stat-value" id="stat-watch">0</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-label">Warming Up</div>
+    <div class="stat-value" id="stat-warmup">0</div>
+  </div>
+</section>
+
+<!-- ── FILTER BAR ─────────────────────────────────────────────── -->
+<section class="filter-bar">
+  <span class="filter-label">Show:</span>
+  <button class="filter-btn active" data-filter="all"     onclick="setFilter('all')">All</button>
+  <button class="filter-btn"        data-filter="alarm"   onclick="setFilter('alarm')">🔴 Alarm</button>
+  <button class="filter-btn"        data-filter="watch"   onclick="setFilter('watch')">🟡 Watch</button>
+  <button class="filter-btn"        data-filter="healthy" onclick="setFilter('healthy')">🟢 Healthy</button>
+</section>
+
+<!-- ── SERVICE CARDS ──────────────────────────────────────────── -->
+<section class="cards-grid" id="cards-grid">
+  <div class="no-services" id="no-services">
+    <div class="no-services-icon">📡</div>
+    <div>Waiting for live metric data…</div>
+    <div class="no-services-sub">Send metrics to <code>POST /api/ingest</code></div>
+  </div>
+</section>
+
+<!-- ── TIMELINE MODAL ─────────────────────────────────────────── -->
+<div id="modal-overlay" class="modal-overlay hidden" onclick="closeModal()">
+  <div class="modal" onclick="event.stopPropagation()">
+    <div class="modal-header">
+      <span id="modal-title">Service Timeline</span>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <canvas id="timeline-chart" height="200"></canvas>
+    <div class="modal-meta" id="modal-meta"></div>
+  </div>
+</div>
+
+<!-- ── MTTA FRAMEWORK ─────────────────────────────────────────── -->
+<section class="mtta-section" id="mtta-section">
+  <div class="section-title">MTTA Framework</div>
+  <div class="mtta-container">
+    <div class="mtta-summary" id="mtta-summary">
+      <div class="mtta-stat">
+        <div class="stat-label">Avg MTTA</div>
+        <div class="stat-value" id="mtta-avg">—</div>
+      </div>
+      <div class="mtta-stat">
+        <div class="stat-label">Target Met Rate (≥120s)</div>
+        <div class="stat-value" id="mtta-rate">—</div>
+      </div>
+      <div class="mtta-stat">
+        <div class="stat-label">Total Events</div>
+        <div class="stat-value" id="mtta-total">—</div>
+      </div>
+    </div>
+    <div class="mtta-chart-wrap">
+      <canvas id="mtta-chart" height="150"></canvas>
+    </div>
+  </div>
+</section>
+
+<!-- ── DRIFT PANEL ────────────────────────────────────────────── -->
+<section class="drift-section" id="drift-section">
+  <div class="section-title">Model Health &amp; Drift</div>
+  <div class="drift-grid" id="drift-grid">Loading…</div>
+</section>
+
+<!-- ── ALARM HISTORY ──────────────────────────────────────────── -->
+<section class="history-section">
+  <div class="history-header">
+    <span class="section-title">Alarm History</span>
+    <button class="btn-refresh" onclick="loadHistory()">↻ Refresh</button>
+  </div>
+  <div class="history-table-wrap">
+    <table class="history-table">
+      <thead>
+        <tr>
+          <th>#</th>
+          <th>Service</th>
+          <th>Fired At</th>
+          <th>Probability</th>
+          <th>CPU %</th>
+          <th>Outcome</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody id="history-body">
+        <tr><td colspan="7" class="empty-row">No alarms recorded yet.</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<script src="/static/script.js"></script>
+</body>
+</html>
