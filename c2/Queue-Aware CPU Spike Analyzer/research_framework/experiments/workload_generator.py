@@ -1,15 +1,21 @@
 """
 Workload generator for CPU-overload experiments.
 
-Adds:
-  - LEVELS preset mapping (low, medium, high, very_high)
-  - Target service loader `load_targets()` reading from services_config.json
-  - Async worker `hammer(session, url, path, rps_per_service, duration)`
-      • Computes pacing interval = 1.0 / max(rps_per_service, 0.1)
-      • Executes paced GET requests with timeout handling
-      • Returns total sent request count
+Sends configurable-rate HTTP traffic to every enabled service in
+services_config.json so the sidecars record realistic
+incoming/processing rates, latency, and CPU behavior.
+
+Usage examples:
+    python workload_generator.py --level low     --duration 120
+    python workload_generator.py --level high    --duration 300
+    python workload_generator.py --rps 200       --duration 180
+    python workload_generator.py --level medium  --duration 60 --path /
+
+Levels: low=10 rps, medium=50 rps, high=100 rps, very_high=200 rps
+(rate is split evenly across enabled services)
 """
 
+import argparse
 import asyncio
 import json
 import os
@@ -26,10 +32,6 @@ CONFIG_PATH = os.path.join(
 
 
 def load_targets():
-    """
-    Parses services_config.json and extracts base URLs for all
-    enabled HTTP microservice targets.
-    """
     with open(CONFIG_PATH, "r", encoding="utf-8") as f:
         cfg = json.load(f)
     return [
@@ -40,9 +42,6 @@ def load_targets():
 
 
 async def hammer(session, url, path, rps_per_service, duration):
-    """
-    Sends continuous paced HTTP requests to target URL at the assigned rate.
-    """
     interval = 1.0 / max(rps_per_service, 0.1)
     end = time.monotonic() + duration
     sent = 0
@@ -55,3 +54,31 @@ async def hammer(session, url, path, rps_per_service, duration):
         sent += 1
         await asyncio.sleep(interval)
     return sent
+
+
+async def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("--level", choices=list(LEVELS), default="medium")
+    p.add_argument("--rps", type=float, default=None, help="Total requests/sec across all services")
+    p.add_argument("--duration", type=float, default=60, help="Seconds")
+    p.add_argument("--path", default="/")
+    args = p.parse_args()
+
+    total_rps = args.rps if args.rps else LEVELS[args.level]
+    targets = load_targets()
+    if not targets:
+        print("No enabled services found in services_config.json")
+        return
+
+    per_service = total_rps / len(targets)
+    print(f"[workload] {total_rps} rps total -> {per_service:.1f} rps x {len(targets)} services for {args.duration}s")
+
+    async with aiohttp.ClientSession() as session:
+        results = await asyncio.gather(*[
+            hammer(session, t, args.path, per_service, args.duration) for t in targets
+        ])
+    print(f"[workload] done. requests sent per service: {results}")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
