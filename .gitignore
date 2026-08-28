@@ -42,3 +42,5 @@ Thumbs.db
 
 # Docker
 .docker/
+cpu_spike_predictor/outputs/live_log.jsonl
+cpu_spike_predictor/outputs/live_status.json
