@@ -1,0 +1,307 @@
+{
+  "last_updated": "2026-05-05 17:15:17",
+  "mode": "live",
+  "pipeline_stage": 5,
+  "stage_status": {
+    "1": "completed",
+    "2": "completed",
+    "3": "completed",
+    "4": "completed",
+    "5": "completed"
+  },
+  "summary": {
+    "total_windows": 76,
+    "failure_windows": 0,
+    "f1_score": 0.0,
+    "precision": 0.0,
+    "recall": 0.0,
+    "semantic_gain": 0.0
+  },
+  "services": [
+    {
+      "name": "tender_bose",
+      "stack": "Unknown",
+      "ram_percent": 0.2,
+      "cpu_percent": 0.0,
+      "heap_mb": 18.9,
+      "gc_count": 0,
+      "status": "NORMAL",
+      "f1_score": 0.0
+    },
+    {
+      "name": "epic_driscoll",
+      "stack": "Unknown",
+      "ram_percent": 0.2,
+      "cpu_percent": 0.0,
+      "heap_mb": 18.9,
+      "gc_count": 0,
+      "status": "NORMAL",
+      "f1_score": 0.0
+    },
+    {
+      "name": "flamboyant_heisenberg",
+      "stack": "Unknown",
+      "ram_percent": 0.2,
+      "cpu_percent": 0.0,
+      "heap_mb": 18.9,
+      "gc_count": 0,
+      "status": "NORMAL",
+      "f1_score": 0.0
+    },
+    {
+      "name": "frosty_ishizaka",
+      "stack": "Unknown",
+      "ram_percent": 0.1,
+      "cpu_percent": 0.0,
+      "heap_mb": 7.9,
+      "gc_count": 0,
+      "status": "NORMAL",
+      "f1_score": 0.0
+    }
+  ],
+  "detection_layers": {
+    "keyword": 0,
+    "tfidf": 0,
+    "metric_fusion": 0
+  },
+  "per_service_f1": {
+    "flamboyant_heisenberg": 0.0,
+    "tender_bose": 0.0,
+    "frosty_ishizaka": 0.0,
+    "epic_driscoll": 0.0
+  },
+  "ram_history": {
+    "timestamps": [
+      "16:12:46",
+      "16:12:47",
+      "16:12:50",
+      "16:12:51",
+      "16:12:51",
+      "16:12:55",
+      "16:12:55",
+      "16:12:56",
+      "16:12:56",
+      "16:13:00",
+      "16:13:00",
+      "16:13:00",
+      "16:13:02",
+      "16:13:05",
+      "16:13:06",
+      "16:13:06",
+      "16:13:10",
+      "16:13:10",
+      "16:13:11",
+      "16:13:11"
+    ],
+    "flamboyant_heisenberg": [
+      0.0,
+      0.0,
+      0.0,
+      0.24,
+      0.0,
+      0.0,
+      0.0,
+      0.24,
+      0.0,
+      0.0,
+      0.24,
+      0.0,
+      0.0,
+      0.0,
+      0.24,
+      0.0,
+      0.0,
+      0.0,
+      0.24,
+      0.0
+    ],
+    "tender_bose": [
+      0.0,
+      0.0,
+      0.24,
+      0.0,
+      0.0,
+      0.24,
+      0.0,
+      0.0,
+      0.0,
+      0.24,
+      0.0,
+      0.0,
+      0.0,
+      0.24,
+      0.0,
+      0.0,
+      0.24,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "frosty_ishizaka": [
+      0.1,
+      0.0,
+      0.0,
+      0.0,
+      0.1,
+      0.0,
+      0.0,
+      0.0,
+      0.1,
+      0.0,
+      0.0,
+      0.1,
+      0.0,
+      0.0,
+      0.0,
+      0.1,
+      0.0,
+      0.0,
+      0.0,
+      0.1
+    ],
+    "epic_driscoll": [
+      0.0,
+      0.24,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.24,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.24,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.24,
+      0.0,
+      0.0
+    ]
+  },
+  "recent_logs": [
+    {
+      "timestamp": "2026-05-05 16:12:46",
+      "service": "frosty_ishizaka",
+      "level": "INFO",
+      "message": "2026/05/05 10:40:15 [notice] 1#1: start worker process 27 | 2026/05/05 10:40:15 [notice] 1#1: start worker process 28 | 2026/05/05 10:40:15 [notice] 1#1: start worker process 29"
+    },
+    {
+      "timestamp": "2026-05-05 16:12:47",
+      "service": "epic_driscoll",
+      "level": "INFO",
+      "message": "* Running on http://127.0.0.1:5000 |  * Running on http://127.0.0.1:5000 | \u001b[33mPress CTRL+C to quit\u001b[0m"
+    },
+    {
+      "timestamp": "2026-05-05 16:12:50",
+      "service": "tender_bose",
+      "level": "INFO",
+      "message": "* Running on http://127.0.0.1:5000 |  * Running on http://172.17.0.3:5000 | \u001b[33mPress CTRL+C to quit\u001b[0m"
+    },
+    {
+      "timestamp": "2026-05-05 16:12:51",
+      "service": "flamboyant_heisenberg",
+      "level": "INFO",
+      "message": "* Running on http://127.0.0.1:5000 |  * Running on http://172.17.0.2:5000 | \u001b[33mPress CTRL+C to quit\u001b[0m"
+    },
+    {
+      "timestamp": "2026-05-05 16:12:51",
+      "service": "frosty_ishizaka",
+      "level": "INFO",
+      "message": "2026/05/05 10:40:15 [notice] 1#1: start worker process 27 | 2026/05/05 10:40:15 [notice] 1#1: start worker process 28 | 2026/05/05 10:40:15 [notice] 1#1: start worker process 29"
+    },
+    {
+      "timestamp": "2026-05-05 16:12:55",
+      "service": "tender_bose",
+      "level": "INFO",
+      "message": "* Running on http://127.0.0.1:5000 |  * Running on http://172.17.0.3:5000 | \u001b[33mPress CTRL+C to quit\u001b[0m"
+    },
+    {
+      "timestamp": "2026-05-05 16:12:55",
+      "service": "epic_driscoll",
+      "level": "INFO",
+      "message": "* Running on http://127.0.0.1:5000 |  * Running on http://127.0.0.1:5000 | \u001b[33mPress CTRL+C to quit\u001b[0m"
+    },
+    {
+      "timestamp": "2026-05-05 16:12:56",
+      "service": "flamboyant_heisenberg",
+      "level": "INFO",
+      "message": "* Running on http://127.0.0.1:5000 |  * Running on http://172.17.0.2:5000 | \u001b[33mPress CTRL+C to quit\u001b[0m"
+    },
+    {
+      "timestamp": "2026-05-05 16:12:56",
+      "service": "frosty_ishizaka",
+      "level": "INFO",
+      "message": "2026/05/05 10:40:15 [notice] 1#1: start worker process 27 | 2026/05/05 10:40:15 [notice] 1#1: start worker process 28 | 2026/05/05 10:40:15 [notice] 1#1: start worker process 29"
+    },
+    {
+      "timestamp": "2026-05-05 16:13:00",
+      "service": "tender_bose",
+      "level": "INFO",
+      "message": "* Running on http://127.0.0.1:5000 |  * Running on http://172.17.0.3:5000 | \u001b[33mPress CTRL+C to quit\u001b[0m"
+    },
+    {
+      "timestamp": "2026-05-05 16:13:00",
+      "service": "flamboyant_heisenberg",
+      "level": "INFO",
+      "message": "* Running on http://127.0.0.1:5000 |  * Running on http://172.17.0.2:5000 | \u001b[33mPress CTRL+C to quit\u001b[0m"
+    },
+    {
+      "timestamp": "2026-05-05 16:13:00",
+      "service": "frosty_ishizaka",
+      "level": "INFO",
+      "message": "2026/05/05 10:40:15 [notice] 1#1: start worker process 27 | 2026/05/05 10:40:15 [notice] 1#1: start worker process 28 | 2026/05/05 10:40:15 [notice] 1#1: start worker process 29"
+    },
+    {
+      "timestamp": "2026-05-05 16:13:02",
+      "service": "epic_driscoll",
+      "level": "INFO",
+      "message": "* Running on http://127.0.0.1:5000 |  * Running on http://127.0.0.1:5000 | \u001b[33mPress CTRL+C to quit\u001b[0m"
+    },
+    {
+      "timestamp": "2026-05-05 16:13:05",
+      "service": "tender_bose",
+      "level": "INFO",
+      "message": "* Running on http://127.0.0.1:5000 |  * Running on http://172.17.0.3:5000 | \u001b[33mPress CTRL+C to quit\u001b[0m"
+    },
+    {
+      "timestamp": "2026-05-05 16:13:06",
+      "service": "flamboyant_heisenberg",
+      "level": "INFO",
+      "message": "* Running on http://127.0.0.1:5000 |  * Running on http://172.17.0.2:5000 | \u001b[33mPress CTRL+C to quit\u001b[0m"
+    },
+    {
+      "timestamp": "2026-05-05 16:13:06",
+      "service": "frosty_ishizaka",
+      "level": "INFO",
+      "message": "2026/05/05 10:40:15 [notice] 1#1: start worker process 27 | 2026/05/05 10:40:15 [notice] 1#1: start worker process 28 | 2026/05/05 10:40:15 [notice] 1#1: start worker process 29"
+    },
+    {
+      "timestamp": "2026-05-05 16:13:10",
+      "service": "tender_bose",
+      "level": "INFO",
+      "message": "* Running on http://127.0.0.1:5000 |  * Running on http://172.17.0.3:5000 | \u001b[33mPress CTRL+C to quit\u001b[0m"
+    },
+    {
+      "timestamp": "2026-05-05 16:13:10",
+      "service": "epic_driscoll",
+      "level": "INFO",
+      "message": "* Running on http://127.0.0.1:5000 |  * Running on http://127.0.0.1:5000 | \u001b[33mPress CTRL+C to quit\u001b[0m"
+    },
+    {
+      "timestamp": "2026-05-05 16:13:11",
+      "service": "flamboyant_heisenberg",
+      "level": "INFO",
+      "message": "* Running on http://127.0.0.1:5000 |  * Running on http://172.17.0.2:5000 | \u001b[33mPress CTRL+C to quit\u001b[0m"
+    },
+    {
+      "timestamp": "2026-05-05 16:13:11",
+      "service": "frosty_ishizaka",
+      "level": "INFO",
+      "message": "2026/05/05 10:40:15 [notice] 1#1: start worker process 27 | 2026/05/05 10:40:15 [notice] 1#1: start worker process 28 | 2026/05/05 10:40:15 [notice] 1#1: start worker process 29"
+    }
+  ]
+}
