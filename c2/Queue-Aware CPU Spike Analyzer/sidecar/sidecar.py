@@ -1,13 +1,5 @@
 """
-
-Adds on top of commit 1:
-  - `state`  — runtime counters
-  - `state_lock` — asyncio lock protecting state
-  - `incoming_timestamps` / `processing_timestamps` — deques for rate windows
-  - `cleanup_old_timestamps()` — keeps only the last-second window
-  - `get_cpu_allocation()` — reads cgroup quota or falls back to cpu_count
-  - `calculate_error_rate()` — ratio helper
-  - `telemetry_middleware` — tracks active requests, latency, errors, timeouts
+Sidecar for Queue-Aware CPU Spike Analyzer
 """
 
 import asyncio
@@ -15,6 +7,7 @@ import os
 import time
 import logging
 from collections import deque
+from datetime import datetime, timezone
 
 import psutil
 from aiohttp import web
@@ -49,48 +42,31 @@ TARGET_HEALTH_PATH = os.environ.get("TARGET_HEALTH_PATH")
 
 
 # =============================================================================
-# RUNTIME STATE  ← NEW
+# RUNTIME STATE
 # =============================================================================
 
 state = {
     "incoming_total": 0,
     "processing_total": 0,
-
     "active_requests": 0,
-
     "http_errors_total": 0,
     "timeouts_total": 0,
-
     "last_latency_ms": 0.0,
-
     "last_health_check_failed": 0,
-
     "last_service_unreachable": 0,
 }
 
-# Request timestamps for rate calculation (last-1-second window).
 incoming_timestamps: deque = deque()
 processing_timestamps: deque = deque()
-
-
-# =============================================================================
-# LOCK  ← NEW
-# =============================================================================
 
 state_lock = asyncio.Lock()
 
 
 # =============================================================================
-# HELPERS  ← NEW
+# HELPERS
 # =============================================================================
 
 def cleanup_old_timestamps():
-    """
-    Keep only timestamps from the previous second.
-
-    This allows incoming_requests and processing_requests
-    to represent requests/second rather than lifetime totals.
-    """
     now = time.monotonic()
 
     while incoming_timestamps:
@@ -105,25 +81,17 @@ def cleanup_old_timestamps():
 
 
 def get_cpu_allocation():
-    """
-    Detect CPU allocation from the Linux cgroup when available.
-    Falls back to the number of CPUs visible to the runtime.
-    """
-    # Docker / Linux cgroup v2
     try:
         quota_path = "/sys/fs/cgroup/cpu.max"
         if os.path.exists(quota_path):
             with open(quota_path, "r") as f:
                 values = f.read().strip().split()
-            if len(values) >= 2:
-                quota, period = values[0], values[1]
-                if quota != "max":
-                    cpus = float(quota) / float(period)
-                    return f"{round(cpus, 2)}vCPU"
+            if len(values) >= 2 and values[0] != "max":
+                cpus = float(values[0]) / float(values[1])
+                return f"{round(cpus, 2)}vCPU"
     except Exception:
         pass
 
-    # Docker / Linux cgroup v1
     try:
         quota_path = "/sys/fs/cgroup/cpu/cpu.cfs_quota_us"
         period_path = "/sys/fs/cgroup/cpu/cpu.cfs_period_us"
@@ -133,21 +101,15 @@ def get_cpu_allocation():
             with open(period_path, "r") as f:
                 period = float(f.read().strip())
             if quota > 0 and period > 0:
-                cpus = quota / period
-                return f"{round(cpus, 2)}vCPU"
+                return f"{round(quota / period, 2)}vCPU"
     except Exception:
         pass
 
-    # Runtime-visible CPU count fallback.
     cpu_count = psutil.cpu_count()
-    if cpu_count:
-        return f"{cpu_count}vCPU"
-
-    return "unknown"
+    return f"{cpu_count}vCPU" if cpu_count else "unknown"
 
 
 def calculate_error_rate():
-    """Return HTTP error ratio against lifetime incoming total."""
     total = state["incoming_total"]
     if total <= 0:
         return 0.0
@@ -155,20 +117,11 @@ def calculate_error_rate():
 
 
 # =============================================================================
-# REQUEST MIDDLEWARE  ← NEW
+# MIDDLEWARE
 # =============================================================================
 
 @web.middleware
 async def telemetry_middleware(request, handler):
-    """
-    Intercept every non-internal request to track:
-      - incoming count and rate
-      - active (in-flight) requests
-      - completed count and rate
-      - per-request latency
-      - HTTP error count
-      - timeout count
-    """
     internal_paths = {"/metrics", "/health", "/ping", "/spike"}
 
     if request.path in internal_paths:
@@ -203,7 +156,6 @@ async def telemetry_middleware(request, handler):
 
     finally:
         latency_ms = (time.monotonic() - start_time) * 1000
-
         async with state_lock:
             state["processing_total"] += 1
             state["active_requests"] -= 1
@@ -225,12 +177,62 @@ async def ping(request):
 
 
 # =============================================================================
+# /METRICS  ← NEW
+# =============================================================================
+
+async def metrics(request):
+    async with state_lock:
+        cleanup_old_timestamps()
+
+        incoming_rate = len(incoming_timestamps)
+        processing_rate = len(processing_timestamps)
+        queue_length = state["active_requests"]
+        http_errors = state["http_errors_total"]
+        timeouts = state["timeouts_total"]
+        last_latency = state["last_latency_ms"]
+
+    # Real CPU utilization — blocking call run on thread via psutil.
+    cpu_percent = psutil.cpu_percent(interval=0.1)
+
+    error_rate = 0.0
+    if incoming_rate > 0:
+        error_rate = http_errors / max(state["incoming_total"], 1)
+
+    return web.json_response({
+        # -----------------------------------------------------------------
+        # Core telemetry
+        # -----------------------------------------------------------------
+        "cpu_usage_percent": round(cpu_percent, 2),
+        "queue_length": queue_length,
+        "incoming_requests": incoming_rate,
+        "processing_requests": processing_rate,
+        "latency_ms": round(last_latency, 2),
+        "service_unreachable": int(state["last_service_unreachable"]),
+        "health_check_failed": int(state["last_health_check_failed"]),
+        "request_timeout": int(timeouts > 0),
+        "http_errors_per_sec": float(http_errors),
+        "error_rate": round(error_rate, 6),
+
+        # -----------------------------------------------------------------
+        # Runtime information
+        # -----------------------------------------------------------------
+        "platform": PLATFORM_NAME,
+        "service": SERVICE_NAME,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "cpu_allocation": get_cpu_allocation(),
+        "measurement_method": "sidecar_runtime_and_proxy",
+        "uptime_seconds": round(time.time() - START_TIME, 2),
+    })
+
+
+# =============================================================================
 # APPLICATION
 # =============================================================================
 
 app = web.Application(middlewares=[telemetry_middleware])
 
 app.router.add_get("/ping", ping)
+app.router.add_get("/metrics", metrics)
 
 
 # =============================================================================
