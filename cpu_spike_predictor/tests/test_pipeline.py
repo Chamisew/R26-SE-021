@@ -1,8 +1,9 @@
 import os
+import json
 import pytest
 import pandas as pd
 import numpy as np
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from fastapi.testclient import TestClient
 
 from src.ingestion import load_cpu_features, load_memory_predictions, merge_datasets, add_lead_time_labels
@@ -190,7 +191,57 @@ def test_mtta_calculation():
     assert mtta_df.loc[0, "mtta_seconds"] == 300.0
 
 
-def test_fastapi_endpoints():
+@pytest.fixture
+def isolated_status_files(tmp_path, monkeypatch):
+    """Keep /predict tests from writing their own services into the live fleet file."""
+    import src.api as api_module
+    paths = {
+        "LIVE_STATUS_FILE": tmp_path / "live_status.json",
+        "LIVE_LOG_FILE": tmp_path / "live_log.jsonl",
+    }
+    for attr, path in paths.items():
+        monkeypatch.setattr(api_module, attr, str(path))
+    return paths
+
+
+def _memory_only_payload(service_name: str) -> dict:
+    """The exact shape Component 3 (MUP) sends: real memory signals, empty CPU block."""
+    return {
+        "service_name": service_name,
+        "project_id": "project_2",
+        "comp2_cpu": {col: 0.0 for col in COMP2_CPU_FEATURE_COLS} | {"cpu_percent": 0.0},
+        "comp3_memory": {"memory_prob": 0.2321, "alert": "FALSE", "pred_label": "NORMAL"},
+    }
+
+
+def _seed_loop_record(status_file, service_name: str, measured_at: str) -> None:
+    """Pretend the Component 2 telemetry loop just wrote this service's row."""
+    status_file.write_text(json.dumps({
+        service_name: {
+            "prediction_timestamp": measured_at,
+            "service_name": service_name,
+            "project_id": "project_2",
+            "cpu_failure_prob": 0.729643,
+            "cpu_alarm": True,
+            "memory_prob": 0.0,
+            "memory_alert": False,
+            "memory_pred_label": "NORMAL",
+            "joint_alarm": False,
+            "action_recommended": "TRIGGER_LOAD_SHEDDING",
+            "rca_narrative": "measured narrative",
+            "feature_contributions": {"cpu_percent": 61.2},
+            "shapley_phi_values": {"cpu_percent": 0.42},
+            "sre_runbook_steps": ["Shed 25% of ingress traffic."],
+            "incident_ticket_payload": {"ticket_id": "INC-C4-LOOP"},
+            "cpu_pct_raw": 88.0,
+            "cpu_trend_raw": 12.5,
+            "state_machine": "DEGRADED",
+            "cpu_telemetry_available": True,
+        }
+    }), encoding="utf-8")
+
+
+def test_fastapi_endpoints(isolated_status_files):
     with TestClient(app) as client:
         health = client.get("/health")
         assert health.status_code == 200
@@ -256,3 +307,70 @@ def test_fastapi_endpoints():
         assert len(d_high["sre_runbook_steps"]) >= 1
         assert isinstance(d_high["feature_contributions"], dict)
         assert len(d_high["feature_contributions"]) > 0
+
+
+def test_memory_only_predict_keeps_measured_cpu_risk(isolated_status_files):
+    """A memory-only POST must refresh memory fields without erasing the CPU risk
+    the Component 2 loop measured, and must not report the all-zero baseline."""
+    status_file = isolated_status_files["LIVE_STATUS_FILE"]
+    svc = "srv-cpu-carry"
+    measured_at = datetime.now(timezone.utc).isoformat()
+    _seed_loop_record(status_file, svc, measured_at)
+
+    with TestClient(app) as client:
+        r = client.post("/predict", json=_memory_only_payload(svc))
+    assert r.status_code == 200, r.text
+
+    saved = json.loads(status_file.read_text(encoding="utf-8"))[svc]
+    assert saved["cpu_failure_prob"] == 0.729643
+    assert saved["cpu_telemetry_available"] is True
+    assert saved["cpu_pct_raw"] == 88.0
+    assert saved["rca_narrative"] == "measured narrative"
+    assert saved["prediction_timestamp"] == measured_at
+    # The memory half is what this request actually owns.
+    assert saved["memory_prob"] == 0.2321
+
+
+def test_memory_only_predict_refreshes_cpu_alarm_and_action(isolated_status_files):
+    """Carrying the CPU measurement must carry through to the joint decision, so the
+    stored row cannot read as a 73% risk with NO_ACTION."""
+    status_file = isolated_status_files["LIVE_STATUS_FILE"]
+    svc = "srv-cpu-decision"
+    _seed_loop_record(status_file, svc, datetime.now(timezone.utc).isoformat())
+
+    with TestClient(app) as client:
+        body = client.post("/predict", json=_memory_only_payload(svc)).json()
+
+    assert body["cpu_alarm"] is True
+    assert body["action_recommended"] != "NO_ACTION"
+
+
+def test_stale_cpu_measurement_is_not_carried(isolated_status_files):
+    """Once Comp2 stops reporting, the last real measurement must expire rather than
+    be re-stamped as live forever."""
+    import src.api as api_module
+    status_file = isolated_status_files["LIVE_STATUS_FILE"]
+    svc = "srv-cpu-stale"
+    old = datetime.now(timezone.utc) - timedelta(seconds=api_module.CPU_CARRY_MAX_AGE_SEC + 5)
+    _seed_loop_record(status_file, svc, old.isoformat())
+
+    with TestClient(app) as client:
+        client.post("/predict", json=_memory_only_payload(svc))
+
+    saved = json.loads(status_file.read_text(encoding="utf-8"))[svc]
+    assert saved["cpu_telemetry_available"] is False
+    assert saved["cpu_failure_prob"] != 0.729643
+    assert saved["memory_prob"] == 0.2321
+
+
+def test_unknown_service_with_no_cpu_telemetry_reports_no_measurement(isolated_status_files):
+    """No Comp2 history at all: the baseline must be flagged, never shown as a risk."""
+    status_file = isolated_status_files["LIVE_STATUS_FILE"]
+    svc = "srv-no-cpu-history"
+
+    with TestClient(app) as client:
+        client.post("/predict", json=_memory_only_payload(svc))
+
+    saved = json.loads(status_file.read_text(encoding="utf-8"))[svc]
+    assert saved["cpu_telemetry_available"] is False
+    assert saved["memory_prob"] == 0.2321
