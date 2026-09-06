@@ -2,16 +2,12 @@
 Sidecar Proxy — Queue-Aware Runtime Telemetry
 
 
-  Logic:
-    • If TARGET_HEALTH_PATH is unset  → only checks TCP reachability.
-    • If TARGET_HEALTH_PATH is set    → also checks HTTP status on that path;
-                                        status >= 500 marks health_check_failed.
-    • 404 is NOT treated as unreachable (service may not expose root).
-    • Updates `last_service_unreachable` and `last_health_check_failed`
-      so /metrics always reflects the latest health state.
+  The burn runs in a thread-pool executor so the async event loop
+  remains unblocked and continues serving /metrics, /health, etc.
 """
 
 import asyncio
+import math
 import os
 import time
 import logging
@@ -228,19 +224,10 @@ async def metrics(request):
 
 
 # =============================================================================
-# /HEALTH  ← NEW
+# /HEALTH
 # =============================================================================
 
 async def health(request):
-    """
-    Check whether the target microservice is reachable.
-
-    If TARGET_HEALTH_PATH is set, the response status of that path is
-    also evaluated; HTTP 5xx is treated as health_check_failed.
-
-    404 on the root path is deliberately ignored — many services do not
-    expose a root or /health route and that must not be treated as down.
-    """
     target_url = f"http://{TARGET_HOST}:{TARGET_PORT}"
 
     if TARGET_HEALTH_PATH:
@@ -292,6 +279,71 @@ async def health(request):
 
 
 # =============================================================================
+# /SPIKE  ← NEW
+# =============================================================================
+
+async def spike(request):
+    """
+    Trigger a real CPU burn for `duration` seconds.
+
+    Query parameters:
+      duration (float, required) — seconds to burn CPU; must be > 0.
+
+    The burn runs in a thread-pool executor so the async event loop
+    continues processing /metrics and /health during the spike.
+    """
+    duration_parameter = request.rel_url.query.get("duration")
+
+    if duration_parameter is None:
+        return web.json_response(
+            {"error": "duration parameter is required"},
+            status=400
+        )
+
+    try:
+        duration = float(duration_parameter)
+    except ValueError:
+        return web.json_response(
+            {"error": "duration must be numeric"},
+            status=400
+        )
+
+    if duration <= 0:
+        return web.json_response(
+            {"error": "duration must be greater than zero"},
+            status=400
+        )
+
+    logging.info(
+        f"[{SERVICE_NAME}] CPU spike requested for {duration} seconds"
+    )
+
+    loop = asyncio.get_running_loop()
+
+    await loop.run_in_executor(
+        None,
+        _cpu_burn,
+        time.monotonic() + duration
+    )
+
+    return web.json_response({
+        "message": "CPU spike completed",
+        "service_id": SERVICE_NAME,
+        "duration_seconds": duration,
+    })
+
+
+def _cpu_burn(end_time: float) -> None:
+    """
+    Spin-loop on a cheap floating-point operation until `end_time`.
+
+    Runs in a thread — safe to block here.
+    """
+    while time.monotonic() < end_time:
+        math.sqrt(64 ** 5)
+
+
+# =============================================================================
 # APPLICATION
 # =============================================================================
 
@@ -300,6 +352,7 @@ app = web.Application(middlewares=[telemetry_middleware])
 app.router.add_get("/ping", ping)
 app.router.add_get("/metrics", metrics)
 app.router.add_get("/health", health)
+app.router.add_get("/spike", spike)
 
 
 # =============================================================================
