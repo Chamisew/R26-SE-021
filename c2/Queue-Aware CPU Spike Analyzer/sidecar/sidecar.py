@@ -1,5 +1,14 @@
 """
-Sidecar for Queue-Aware CPU Spike Analyzer
+Sidecar Proxy — Queue-Aware Runtime Telemetry
+
+
+  Logic:
+    • If TARGET_HEALTH_PATH is unset  → only checks TCP reachability.
+    • If TARGET_HEALTH_PATH is set    → also checks HTTP status on that path;
+                                        status >= 500 marks health_check_failed.
+    • 404 is NOT treated as unreachable (service may not expose root).
+    • Updates `last_service_unreachable` and `last_health_check_failed`
+      so /metrics always reflects the latest health state.
 """
 
 import asyncio
@@ -9,6 +18,7 @@ import logging
 from collections import deque
 from datetime import datetime, timezone
 
+import aiohttp
 import psutil
 from aiohttp import web
 
@@ -177,7 +187,7 @@ async def ping(request):
 
 
 # =============================================================================
-# /METRICS  ← NEW
+# /METRICS
 # =============================================================================
 
 async def metrics(request):
@@ -191,7 +201,6 @@ async def metrics(request):
         timeouts = state["timeouts_total"]
         last_latency = state["last_latency_ms"]
 
-    # Real CPU utilization — blocking call run on thread via psutil.
     cpu_percent = psutil.cpu_percent(interval=0.1)
 
     error_rate = 0.0
@@ -199,9 +208,6 @@ async def metrics(request):
         error_rate = http_errors / max(state["incoming_total"], 1)
 
     return web.json_response({
-        # -----------------------------------------------------------------
-        # Core telemetry
-        # -----------------------------------------------------------------
         "cpu_usage_percent": round(cpu_percent, 2),
         "queue_length": queue_length,
         "incoming_requests": incoming_rate,
@@ -212,16 +218,76 @@ async def metrics(request):
         "request_timeout": int(timeouts > 0),
         "http_errors_per_sec": float(http_errors),
         "error_rate": round(error_rate, 6),
-
-        # -----------------------------------------------------------------
-        # Runtime information
-        # -----------------------------------------------------------------
         "platform": PLATFORM_NAME,
         "service": SERVICE_NAME,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "cpu_allocation": get_cpu_allocation(),
         "measurement_method": "sidecar_runtime_and_proxy",
         "uptime_seconds": round(time.time() - START_TIME, 2),
+    })
+
+
+# =============================================================================
+# /HEALTH  ← NEW
+# =============================================================================
+
+async def health(request):
+    """
+    Check whether the target microservice is reachable.
+
+    If TARGET_HEALTH_PATH is set, the response status of that path is
+    also evaluated; HTTP 5xx is treated as health_check_failed.
+
+    404 on the root path is deliberately ignored — many services do not
+    expose a root or /health route and that must not be treated as down.
+    """
+    target_url = f"http://{TARGET_HOST}:{TARGET_PORT}"
+
+    if TARGET_HEALTH_PATH:
+        target_url += TARGET_HEALTH_PATH
+
+    start_time = time.monotonic()
+
+    target_reachable = False
+    health_failed = False
+
+    try:
+        timeout = aiohttp.ClientTimeout(total=5)
+
+        async with aiohttp.ClientSession() as session:
+            async with session.get(target_url, timeout=timeout) as response:
+                target_reachable = True
+
+                if TARGET_HEALTH_PATH:
+                    health_failed = response.status >= 500
+                else:
+                    health_failed = False
+
+    except asyncio.TimeoutError:
+        target_reachable = False
+        health_failed = True
+
+    except aiohttp.ClientError:
+        target_reachable = False
+        health_failed = True
+
+    except Exception:
+        target_reachable = False
+        health_failed = True
+
+    latency_ms = (time.monotonic() - start_time) * 1000
+
+    async with state_lock:
+        state["last_service_unreachable"] = int(not target_reachable)
+        state["last_health_check_failed"] = int(health_failed)
+
+    return web.json_response({
+        "status": "ok" if target_reachable and not health_failed else "failed",
+        "service_id": SERVICE_NAME,
+        "target_reachable": target_reachable,
+        "health_check_failed": int(health_failed),
+        "latency_ms": round(latency_ms, 2),
+        "target": target_url,
     })
 
 
@@ -233,6 +299,7 @@ app = web.Application(middlewares=[telemetry_middleware])
 
 app.router.add_get("/ping", ping)
 app.router.add_get("/metrics", metrics)
+app.router.add_get("/health", health)
 
 
 # =============================================================================
