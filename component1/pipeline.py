@@ -18,3 +18,25 @@ Core Responsibilities:
    pre-failure/failure incident phases, and export ML-ready datasets.
 =============================================================================
 """
+CONFIG = {
+    "data_dir"               : "data/",
+    "output_dir"             : "output/",
+    "models_dir"             : "models/",
+    "failure_events_csv"     : "data/failure_events.csv",
+    "drain3_state_file"      : "models/drain3_state.bin",
+    "live_output_csv"        : "output/live_raw_collection.csv",
+    "pipeline_output_csv"    : "output/pipeline_output.csv",
+    "ml_ready_csv"           : "output/ml_ready_dataset.csv",
+    "drain3_depth"           : 4,
+    "drain3_sim_thresh"      : 0.4,
+    "drain3_max_children"    : 100,
+    "window_size"            : 12,
+    "window_minutes"         : 5,
+    "tfidf_threshold"        : 0.12,
+    "semantic_margin"        : 0.05,
+    "semantic_backend"       : "tfidf",
+    "embedding_model"        : "all-MiniLM-L6-v2",
+    "embedding_threshold"    : 0.35,
+    "metric_score_threshold" : 3,
+    "live_duration_minutes"  : 1,
+}
