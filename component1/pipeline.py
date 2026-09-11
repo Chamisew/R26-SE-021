@@ -59,3 +59,11 @@ def load_failure_events():
         return df.dropna(subset=["start_time", "end_time"])
     except Exception:
         return pd.DataFrame(columns=expected_cols)
+
+        def normalize_event_timestamps(df, col="timestamp"):
+    """Coerce timestamps to ISO UTC-naive datetime objects."""
+    if df is None or df.empty or col not in df.columns:
+        return df
+    df = df.copy()
+    df[col] = pd.to_datetime(df[col], errors="coerce", utc=True).dt.tz_localize(None)
+    return df
