@@ -40,3 +40,22 @@ CONFIG = {
     "metric_score_threshold" : 3,
     "live_duration_minutes"  : 1,
 }
+def load_failure_events():
+    """Load failure events from configuration path.
+    Returns DataFrame with validated schema or empty DataFrame if missing/malformed.
+    """
+    events_path = CONFIG.get("failure_events_csv", os.path.join(os.path.dirname(__file__), "data", "failure_events.csv"))
+    expected_cols = ["service_name", "failure_type", "start_time", "end_time"]
+    
+    if not os.path.exists(events_path):
+        return pd.DataFrame(columns=expected_cols)
+    try:
+        df = pd.read_csv(events_path)
+        for col in expected_cols:
+            if col not in df.columns:
+                return pd.DataFrame(columns=expected_cols)
+        df["start_time"] = pd.to_datetime(df["start_time"], errors="coerce")
+        df["end_time"] = pd.to_datetime(df["end_time"], errors="coerce")
+        return df.dropna(subset=["start_time", "end_time"])
+    except Exception:
+        return pd.DataFrame(columns=expected_cols)
