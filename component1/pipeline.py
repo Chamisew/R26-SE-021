@@ -67,3 +67,31 @@ def load_failure_events():
     df = df.copy()
     df[col] = pd.to_datetime(df[col], errors="coerce", utc=True).dt.tz_localize(None)
     return df
+
+    def compute_label_3state(df, failure_events):
+    """Compute label_3state: NORMAL, PRE_FAILURE (5-10 min prior), and FAILURE."""
+    df = df.copy()
+    df["label_3state"] = "NORMAL"
+
+    if failure_events is None or failure_events.empty or "timestamp" not in df.columns:
+        return df
+
+    df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
+
+    for _, event in failure_events.iterrows():
+        svc = event["service_name"]
+        start = event["start_time"]
+        end = event["end_time"] if "end_time" in event and pd.notna(event["end_time"]) else start
+
+        svc_mask = df["service_name"] == svc
+        delta_start = (start - df["timestamp"]).dt.total_seconds()
+
+        # PRE_FAILURE: 5-10 minutes prior to failure event start
+        mask_pre = svc_mask & (delta_start > 5 * 60) & (delta_start <= 10 * 60)
+        df.loc[mask_pre, "label_3state"] = "PRE_FAILURE"
+
+        # FAILURE: inside the failure duration window
+        mask_fail = svc_mask & (df["timestamp"] >= start) & (df["timestamp"] <= end)
+        df.loc[mask_fail, "label_3state"] = "FAILURE"
+
+    return df
