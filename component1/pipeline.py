@@ -95,3 +95,35 @@ def load_failure_events():
         df.loc[mask_fail, "label_3state"] = "FAILURE"
 
     return df
+
+    def fill_ground_truth(df, failure_events):
+    df = df.copy()
+    if "ground_truth_label" not in df.columns:
+        df["ground_truth_label"] = "UNKNOWN"
+    else:
+        df["ground_truth_label"] = df["ground_truth_label"].fillna("UNKNOWN")
+
+    if failure_events is None or failure_events.empty:
+        return df
+
+    df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
+
+    for _, event in failure_events.iterrows():
+        svc = event["service_name"]
+        start = event["start_time"]
+        end = event["end_time"]
+        mask = (
+            (df["service_name"] == svc)
+            & (df["timestamp"] >= start)
+            & (df["timestamp"] <= end)
+        )
+        df.loc[mask, "ground_truth_label"] = "FAILURE"
+
+    # Only set to NORMAL if the service was actively tracked in failure_events
+    services_with_events = set(failure_events["service_name"].unique())
+    for svc in services_with_events:
+        svc_mask = df["service_name"] == svc
+        unknown_mask = svc_mask & (df["ground_truth_label"] == "UNKNOWN")
+        df.loc[unknown_mask, "ground_truth_label"] = "NORMAL"
+
+    return df
