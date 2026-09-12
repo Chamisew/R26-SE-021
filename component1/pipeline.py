@@ -127,3 +127,11 @@ def load_failure_events():
         df.loc[unknown_mask, "ground_truth_label"] = "NORMAL"
 
     return df
+
+    def validate_telemetry_schema(df):
+    """Validate presence of minimum core schema columns in input telemetry."""
+    required_schema = ["timestamp", "service_name", "ram_percent", "cpu_percent", "heap_mb_used"]
+    missing = [col for col in required_schema if col not in df.columns]
+    if missing:
+        raise ValueError(f"Telemetry schema validation failed. Missing columns: {missing}")
+    return True
