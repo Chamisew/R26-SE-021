@@ -149,3 +149,24 @@ cleaned = cleaned.drop_duplicates(
     subset=["timestamp", "service_name", "log_message"],
     keep="first"
 ).reset_index(drop=True)
+
+def _detect_azure_stack(service_name: str, sidecar_lang: str) -> str:
+    lang = (sidecar_lang or "").lower()
+    cname = (service_name or "").lower()
+    
+    mapping = [
+        (("python", "flask", "django", "fastapi"), "Python/Flask"),
+        (("node", "express", "javascript", "npm"), "Node.js/Express"),
+        (("java", "spring", "jvm", "tomcat"), "Java/SpringBoot"),
+        (("dotnet", "aspnet", "c#"), ".NET/Core"),
+        (("go", "golang"), "Go/net_http"),
+        (("php", "fpm"), "PHP/FPM"),
+        (("ruby", "rails", "puma"), "Ruby/Puma"),
+        (("swift", "vapor"), "Swift/Vapor")
+    ]
+    
+    for keywords, stack_label in mapping:
+        if any(k in lang or k in cname for k in keywords):
+            return stack_label
+            
+    return "Microservice"
