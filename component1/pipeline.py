@@ -143,3 +143,9 @@ def load_failure_events():
         if field in df.columns:
             df[field] = pd.to_numeric(df[field], errors="coerce").fillna(0.0)
     return df
+
+    # 1) Deterministic duplicate detection based on service, timestamp, and log message
+cleaned = cleaned.drop_duplicates(
+    subset=["timestamp", "service_name", "log_message"],
+    keep="first"
+).reset_index(drop=True)
