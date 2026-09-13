@@ -135,3 +135,11 @@ def load_failure_events():
     if missing:
         raise ValueError(f"Telemetry schema validation failed. Missing columns: {missing}")
     return True
+
+    def normalize_numeric_telemetry(df):
+    """Safely coerce RAM, CPU, Heap, and GC fields to numeric types."""
+    numeric_fields = ["ram_percent", "cpu_percent", "heap_mb_used", "heap_max", "gc_count"]
+    for field in numeric_fields:
+        if field in df.columns:
+            df[field] = pd.to_numeric(df[field], errors="coerce").fillna(0.0)
+    return df
