@@ -1,17 +1,15 @@
 """
 Empirical Validation Suite: Comparing QPI with Actual System Behavior
 
-Adds:
-  - Configuration constants (SCRIPT_DIR, DATASET_PATH, etc.)
-  - `generate_empirical_workload(duration_sec=600, seed=42)`:
-      • Multi-stage workload cycles (Low Load -> Moderate Load -> High Load -> Overload)
-      • Arrival rate (λ) and service capacity (μ) dynamics
-      • Queue growth dynamics: dQ/dt = λ - μ with M/M/1 pressure
-      • Dynamic CPU contention and response latency explosion
-      • Stochastic error sampling
-      • Baseline calibration of healthy Q_ref via P95
-      • Authoritative calibrated QPI calculation
-      • Machine learning derived features (z-scores, efficiency, growth rate, failure labels)
+Adds on top of commit 1:
+  - `plot_empirical_validation(df, output_path=PLOT_PATH)`:
+      • Background color shading per workload stage (Low, Moderate, High, Overload)
+      • Panel 1: Throughput rates (λ vs μ)
+      • Panel 2: Queue Depth (Q) with Q_critical reference line
+      • Panel 3: Host CPU utilization (%) with warning threshold (80%)
+      • Panel 4: Queue Pressure Index (QPI) vs CPU Pressure Index with early lead highlight
+      • Panel 5: Twin-axis response time (ms) and interval error rate (req/s)
+      • Publication annotations and styled legend
 """
 
 import os
@@ -20,6 +18,7 @@ import time
 import math
 import numpy as np
 import pandas as pd
+import matplotlib.pyplot as plt
 
 # Default output file paths
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -29,15 +28,6 @@ PLOT_PATH = os.path.join(SCRIPT_DIR, "qpi_empirical_validation.png")
 
 
 def generate_empirical_workload(duration_sec=600, seed=42):
-    """
-    Generates a multi-cycle time-series simulation of microservice behavior
-    under ramping workload conditions:
-      Stage 1 (0-60s):   Low load      (λ = 10, μ = 50, CPU ~ 15%, Queue ~ 0)
-      Stage 2 (60-120s): Moderate load (λ = 30, μ = 50, CPU ~ 45%, Queue ~ 2)
-      Stage 3 (120-210s): High load    (λ = 45 -> 55, μ = 50, CPU ~ 70%, Queue ~ 10 -> 30, QPI rising)
-      Stage 4 (210-300s): Overload     (λ = 85, μ = 35 [degraded], CPU ~ 98%, Queue > 50, Latency/Errors spike)
-      Cycle 2 repeats for out-of-sample machine learning validation.
-    """
     np.random.seed(seed)
     records = []
 
@@ -51,9 +41,8 @@ def generate_empirical_workload(duration_sec=600, seed=42):
         timestamp = t_start + t
         t_phase = t % cycle_len
         if t_phase == 0:
-            queue = 0.0  # Reset queue depth at cycle boundary
+            queue = 0.0
 
-        # 1. Determine Workload Stage & Arrival Rate (λ)
         if t_phase < 60:
             stage = "Low Load"
             lambda_base = 10.0
@@ -70,28 +59,24 @@ def generate_empirical_workload(duration_sec=600, seed=42):
             error_prob = 0.001
         elif t_phase < 210:
             stage = "High Load"
-            # Ramp λ towards and slightly past saturation point (40 -> 55 req/s)
             ramp_factor = (t_phase - 120) / 90.0
-            lambda_base = 40.0 + ramp_factor * 15.0  # 40 -> 55 req/s
+            lambda_base = 40.0 + ramp_factor * 15.0
             mu_capacity = 50.0
-            base_cpu = 55.0 + ramp_factor * 25.0      # 55 -> 80% CPU
-            base_latency = 35.0 + (ramp_factor ** 2) * 120.0  # Latency starts curving up
+            base_cpu = 55.0 + ramp_factor * 25.0
+            base_latency = 35.0 + (ramp_factor ** 2) * 120.0
             error_prob = 0.005 * ramp_factor
         else:
             stage = "Overload"
             ramp_factor = (t_phase - 210) / 90.0
-            lambda_base = 55.0 + ramp_factor * 35.0   # 55 -> 90 req/s
-            # Thermal/thread contention degrades service capacity μ
-            mu_capacity = 50.0 - ramp_factor * 18.0   # 50 -> 32 req/s
+            lambda_base = 55.0 + ramp_factor * 35.0
+            mu_capacity = 50.0 - ramp_factor * 18.0
             base_cpu = min(99.5, 80.0 + ramp_factor * 20.0)
-            base_latency = 150.0 + (ramp_factor ** 2.5) * 800.0  # Latency explodes
+            base_latency = 150.0 + (ramp_factor ** 2.5) * 800.0
             error_prob = 0.02 + 0.15 * ramp_factor
 
-        # Add natural stochastic noise
         inc_rate = max(0.0, lambda_base + np.random.normal(0, 1.2))
         proc_rate_max = max(1.0, mu_capacity + np.random.normal(0, 1.0))
 
-        # 2. Queue Dynamics (dQ/dt = λ - μ with M/M/1 queuing pressure near saturation)
         rho = min(0.98, inc_rate / proc_rate_max)
         queue_expected = (rho ** 2) / max(1.0 - rho, 0.02) if rho > 0.5 else 0.0
 
@@ -99,7 +84,6 @@ def generate_empirical_workload(duration_sec=600, seed=42):
         if diff > 0:
             queue += diff * 1.0
         else:
-            # Drain towards equilibrium expected queue
             if queue > queue_expected:
                 queue -= min(queue - queue_expected, abs(diff) * 1.0)
             else:
@@ -108,29 +92,24 @@ def generate_empirical_workload(duration_sec=600, seed=42):
         queue = max(0.0, queue)
         actual_proc_rate = min(inc_rate + queue, proc_rate_max)
 
-        # 3. CPU Dynamics
         cpu_noise = np.random.normal(0, 1.2)
         cpu_percent = min(100.0, max(5.0, base_cpu + (queue / 50.0) * 10.0 + cpu_noise))
 
-        # 4. Latency & Error Metrics
         latency_ms = max(5.0, base_latency + (queue / 4.0) ** 1.6 + np.random.exponential(5))
         new_reqs = int(inc_rate)
         total_requests += new_reqs
         new_errors = int(np.random.binomial(new_reqs, min(1.0, error_prob))) if new_reqs > 0 else 0
         total_errors += new_errors
 
-        # 5. QPI placeholder
         qpi = 0.0
         cpu_pi = min(1.0, cpu_percent / 100.0)
 
-        # 6. Failure Status Labeling
-        # 0 = NORMAL, 1 = PRE_FAILURE (QPI high, latency curving up, before full crash), 2 = DEGRADED/FAILED
         if t_phase < 150:
             failure_status = 0
         elif t_phase < 210:
-            failure_status = 1  # Pre-Failure window
+            failure_status = 1
         else:
-            failure_status = 2  # Severe degradation / Overload
+            failure_status = 2
 
         records.append({
             "timestamp": timestamp,
@@ -152,16 +131,14 @@ def generate_empirical_workload(duration_sec=600, seed=42):
 
     df = pd.DataFrame(records)
 
-    # ── Step 2: Calibrate Qref from P95 of Healthy Baseline (Low Load stage only) ──────────────
     try:
         from queue_analyzer import calibrate_healthy_qref
-        qref_map = calibrate_healthy_qref(df, percentile=95, print_report=True)
+        qref_map = calibrate_healthy_qref(df, percentile=95, print_report=False)
         qref_val = qref_map if isinstance(qref_map, (int, float)) else list(qref_map.values())[0]
     except ImportError:
         healthy_queues = df[df['workload_stage'] == 'Low Load']['in_flight_queue']
         qref_val = max(1.0, float(np.percentile(healthy_queues, 95)))
 
-    # Recompute QPI across the full dataset using the frozen calibrated Qref.
     epsilon = 0.001
     arrival_ratio = df['incoming_rate'] / np.maximum(df['processing_rate'], epsilon)
     df['qref'] = qref_val
@@ -169,9 +146,8 @@ def generate_empirical_workload(duration_sec=600, seed=42):
     df['queue_pressure_index'] = np.minimum(
         1.0, (df['in_flight_queue'] / qref_val) * arrival_ratio
     ).round(4)
-    df['qpi'] = df['queue_pressure_index']   # authoritative, calibrated QPI
+    df['qpi'] = df['queue_pressure_index']
 
-    # Derive complete ML feature representation
     df['latency_ms'] = df['response_time_ms']
     df['queue_growth_rate'] = (df['incoming_rate'] - df['processing_rate']).round(4)
     df['processing_efficiency'] = np.minimum(1.0, df['processing_rate'] / np.maximum(df['incoming_rate'], epsilon)).round(4)
@@ -190,13 +166,100 @@ def generate_empirical_workload(duration_sec=600, seed=42):
         from queue_analyzer import label_pre_failure
         df = label_pre_failure(df, lookahead_sec=30)
     except ImportError:
-        # Fallback pre-failure lookahead labeler
         df['ml_label'] = ((df['failure_status'] == 1) | (df['failure_status'] == 2)).astype(int)
 
     return df
 
 
+# =============================================================================
+# MULTI-PANEL VALIDATION PLOT  ← NEW
+# =============================================================================
+
+def plot_empirical_validation(df, output_path=PLOT_PATH):
+    """
+    Generates a publication-quality stacked multi-panel plot comparing
+    QPI, CPU, Queue, Latency, and Failure Onset across workload stages.
+    """
+    fig, axes = plt.subplots(5, 1, figsize=(14, 12), sharex=True)
+    fig.suptitle("Empirical Validation: QPI vs System Degradation Dynamics", fontsize=16, fontweight='bold', y=0.98)
+
+    # Isolate canonical 300s workload cycle for publication plotting
+    df_plot = df[df['time_sec'] < 300].copy() if df['time_sec'].max() >= 300 else df.copy()
+    t = df_plot['time_sec']
+
+    # Define stage background shading
+    stages = [
+        (0, 60, "Low Load", "#e8f5e9"),
+        (60, 120, "Moderate Load", "#fffde7"),
+        (120, 210, "High Load", "#fff3e0"),
+        (210, 300, "Overload / Degradation", "#ffebee")
+    ]
+
+    for ax in axes:
+        for t_start, t_end, name, color in stages:
+            ax.axvspan(t_start, t_end, color=color, alpha=0.5, zorder=0)
+
+    # Panel 1: Throughput Rates (λ vs μ)
+    axes[0].plot(t, df_plot['incoming_rate'], label='Incoming Rate (lambda)', color='#1e88e5', lw=2)
+    axes[0].plot(t, df_plot['processing_rate'], label='Processing Rate (mu)', color='#43a047', lw=2, linestyle='--')
+    axes[0].set_ylabel("Req / sec", fontweight='bold')
+    axes[0].set_title("1. Workload Rates (lambda vs mu)", fontsize=11, loc='left', fontweight='bold')
+    axes[0].legend(loc='upper left', frameon=True)
+    axes[0].grid(True, linestyle=':', alpha=0.6)
+
+    # Panel 2: Queue Depth (in-flight)
+    axes[1].plot(t, df_plot['in_flight_queue'], label='In-Flight Queue (Q)', color='#fb8c00', lw=2)
+    axes[1].axhline(50, color='#d32f2f', linestyle=':', label='Q_critical Reference (50)')
+    axes[1].set_ylabel("Requests", fontweight='bold')
+    axes[1].set_title("2. In-Flight Queue Depth (Backlog)", fontsize=11, loc='left', fontweight='bold')
+    axes[1].legend(loc='upper left', frameon=True)
+    axes[1].grid(True, linestyle=':', alpha=0.6)
+
+    # Panel 3: CPU Utilization
+    axes[2].plot(t, df_plot['cpu_percent'], label='CPU Utilization (%)', color='#e53935', lw=2)
+    axes[2].axhline(80, color='#880e4f', linestyle='--', label='CPU Warning Threshold (80%)')
+    axes[2].set_ylabel("CPU %", fontweight='bold')
+    axes[2].set_title("3. Host CPU Utilization", fontsize=11, loc='left', fontweight='bold')
+    axes[2].legend(loc='upper left', frameon=True)
+    axes[2].grid(True, linestyle=':', alpha=0.6)
+
+    # Panel 4: QPI vs CPU Pressure Index (Proactive Lead Highlight)
+    axes[3].plot(t, df_plot['qpi'], label='Queue Pressure Index (QPI)', color='#8e24aa', lw=2.5)
+    axes[3].plot(t, df_plot['cpu_pi'], label='CPU Pressure Index (CPU PI)', color='#757575', lw=1.5, linestyle=':')
+    axes[3].axhline(0.4, color='#8e24aa', linestyle='--', alpha=0.7, label='QPI Warning Level (0.4)')
+    axes[3].set_ylabel("Index (0 - 1.0)", fontweight='bold')
+    axes[3].set_title("4. Queue Pressure Index (QPI) -- Proactive Lead Indicator", fontsize=11, loc='left', fontweight='bold')
+    axes[3].legend(loc='upper left', frameon=True)
+    axes[3].grid(True, linestyle=':', alpha=0.6)
+
+    # Panel 5: Response Time & Failure Onset
+    ax5_twin = axes[4].twinx()
+    p1 = axes[4].plot(t, df_plot['response_time_ms'], label='Response Time (ms)', color='#00897b', lw=2)
+    p2 = ax5_twin.plot(t, df_plot['interval_errors'], label='Error Rate (req/s)', color='#d81b60', lw=1.5, linestyle='-.')
+    axes[4].set_ylabel("Latency (ms)", fontweight='bold')
+    ax5_twin.set_ylabel("Errors / sec", fontweight='bold', color='#d81b60')
+    axes[4].set_xlabel("Time (seconds) -->", fontweight='bold', fontsize=12)
+    axes[4].set_title("5. System Performance & Degradation (Response Time & Errors)", fontsize=11, loc='left', fontweight='bold')
+
+    # Combined Legend for panel 5
+    lines = p1 + p2
+    labels = [l.get_label() for l in lines]
+    axes[4].legend(lines, labels, loc='upper left', frameon=True)
+    axes[4].grid(True, linestyle=':', alpha=0.6)
+
+    # Annotate Stages at top
+    for t_start, t_end, name, _ in stages:
+        axes[0].text(t_start + (t_end - t_start) / 2, axes[0].get_ylim()[1] * 0.85, name,
+                     ha='center', va='center', fontweight='bold', fontsize=9,
+                     bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.8, edgecolor='gray'))
+
+    plt.tight_layout()
+    fig.subplots_adjust(top=0.93)
+    plt.savefig(output_path, dpi=300)
+    plt.close()
+    print(f"[+] Empirical validation plot saved to: {output_path}")
+
+
 if __name__ == "__main__":
     df = generate_empirical_workload()
-    df.to_csv(DATASET_PATH, index=False)
-    print(f"Generated {len(df)} telemetry rows. Saved to {DATASET_PATH}")
+    plot_empirical_validation(df)
