@@ -184,3 +184,11 @@ def _detect_azure_stack(service_name: str, sidecar_lang: str) -> str:
     if any(k in upper for k in ("DEBUG", "TRACE")):
         return "DEBUG"
     return "INFO"
+
+    GC_KEYWORDS = ("GC", "GARBAGE", "COLLECTION", "PAUSE", "YOUNG GEN", "OLD GEN")
+
+def _has_gc_keyword(text: str) -> bool:
+    if not text:
+        return False
+    upper = str(text).upper()
+    return any(k in upper for k in GC_KEYWORDS)
