@@ -170,3 +170,17 @@ def _detect_azure_stack(service_name: str, sidecar_lang: str) -> str:
             return stack_label
             
     return "Microservice"
+
+    def _detect_log_level(text: str) -> str:
+    if not text:
+        return "INFO"
+    upper = str(text).upper()
+    if any(k in upper for k in ("CRITICAL", "FATAL", "EMERGENCY")):
+        return "CRITICAL"
+    if any(k in upper for k in ("ERROR", "EXCEPTION", "OOM", "FAIL")):
+        return "ERROR"
+    if any(k in upper for k in ("WARN", "WARNING")):
+        return "WARNING"
+    if any(k in upper for k in ("DEBUG", "TRACE")):
+        return "DEBUG"
+    return "INFO"
