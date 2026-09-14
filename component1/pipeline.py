@@ -192,3 +192,8 @@ def _has_gc_keyword(text: str) -> bool:
         return False
     upper = str(text).upper()
     return any(k in upper for k in GC_KEYWORDS)
+
+    # Extracted parsing logic block inside stage2_drain3_parsing:
+result = miner.add_log_message(msg)
+templates.append(result["template_mined"])
+cluster_ids.append(result["cluster_id"])
