@@ -197,3 +197,9 @@ def _has_gc_keyword(text: str) -> bool:
 result = miner.add_log_message(msg)
 templates.append(result["template_mined"])
 cluster_ids.append(result["cluster_id"])
+
+state_path = CONFIG.get("drain3_state_file", os.path.join(config["models_dir"], "drain3_state.bin"))
+os.makedirs(os.path.dirname(state_path), exist_ok=True)
+with open(state_path, "wb") as f:
+    pickle.dump(miner, f)
+print(f"Drain3 state successfully saved -> {state_path}")
