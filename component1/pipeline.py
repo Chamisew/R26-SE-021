@@ -203,3 +203,12 @@ os.makedirs(os.path.dirname(state_path), exist_ok=True)
 with open(state_path, "wb") as f:
     pickle.dump(miner, f)
 print(f"Drain3 state successfully saved -> {state_path}")
+
+def _layer1_keyword(template: str):
+    """Layer 1: Deterministic word-boundary keyword matching for memory failures."""
+    if not template or not isinstance(template, str):
+        return None, None, None
+    for pattern, failure_type in LAYER1_PATTERNS:
+        if pattern.search(template):
+            return "FAILURE", "keyword", failure_type
+    return None, None, None
