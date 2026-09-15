@@ -212,3 +212,30 @@ def _layer1_keyword(template: str):
         if pattern.search(template):
             return "FAILURE", "keyword", failure_type
     return None, None, None
+
+    def _layer2_tfidf(template: str, tmpl_lookup: dict = None, threshold: float = 0.12, margin: float = 0.05):
+    """Layer 2: TF-IDF semantic template similarity layer."""
+    template_str = str(template) if template is not None else ""
+    if tmpl_lookup is not None and template_str in tmpl_lookup:
+        entry = tmpl_lookup[template_str]
+        sim_failure = entry.get("sim_failure", 0.0)
+        sim_normal = entry.get("sim_normal", 0.0)
+        ftype = entry.get("failure_type", "oom")
+    else:
+        # Fallback inline evaluation
+        all_docs = [template_str] + FAILURE_REFERENCE_CORPUS + NORMAL_REFERENCE_CORPUS
+        v = TfidfVectorizer(ngram_range=(1, 2), max_features=5000, sublinear_tf=True)
+        v.fit(all_docs)
+        t_vec = v.transform([template_str])
+        f_mat = v.transform(FAILURE_REFERENCE_CORPUS)
+        n_mat = v.transform(NORMAL_REFERENCE_CORPUS)
+        sim_f_row = cosine_similarity(t_vec, f_mat)[0]
+        sim_n_row = cosine_similarity(t_vec, n_mat)[0]
+        best_f_idx = int(np.argmax(sim_f_row))
+        sim_failure = float(sim_f_row[best_f_idx])
+        sim_normal = float(np.max(sim_n_row))
+        ftype = FAILURE_REFERENCE_TYPES[best_f_idx]
+
+    if sim_failure > threshold and (sim_failure - sim_normal) > margin:
+        return "FAILURE", "tfidf_semantic", ftype
+    return "NORMAL", "normal", "none"
