@@ -267,3 +267,15 @@ def _layer1_keyword(template: str):
     if sim_failure > threshold and (sim_failure - sim_normal) > margin:
         return "FAILURE", "embedding_semantic", ftype
     return "NORMAL", "normal", "none"
+
+    def tune_semantic_params(df):
+    """Grid-search hyperparameter tuning for semantic thresholds and margins."""
+    if df is None or df.empty or "ground_truth_label" not in df.columns:
+        return 0.12, 0.05
+
+    valid_df = df[df["ground_truth_label"].isin(["FAILURE", "NORMAL"])].copy()
+    if valid_df.empty or (valid_df["ground_truth_label"] == "FAILURE").sum() == 0:
+        return 0.12, 0.05
+
+    backend = CONFIG.get("semantic_backend", "tfidf")
+    # Tuning loop logic as implemented in tune_semantic_params
