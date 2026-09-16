@@ -239,3 +239,31 @@ def _layer1_keyword(template: str):
     if sim_failure > threshold and (sim_failure - sim_normal) > margin:
         return "FAILURE", "tfidf_semantic", ftype
     return "NORMAL", "normal", "none"
+
+    def _layer2_embedding(template: str, tmpl_lookup: dict = None, threshold: float = 0.35, margin: float = 0.05):
+    """Layer 2: Dense sentence embedding semantic similarity layer."""
+    template_str = str(template) if template is not None else ""
+    if tmpl_lookup is not None and template_str in tmpl_lookup:
+        entry = tmpl_lookup[template_str]
+        sim_failure = entry["sim_failure"]
+        sim_normal = entry["sim_normal"]
+        ftype = entry["failure_type"]
+    else:
+        model = _get_embedding_model()
+        t_emb = model.encode([template_str], convert_to_numpy=True)
+        t_emb = t_emb / max(float(np.linalg.norm(t_emb)), 1e-9)
+        f_emb = model.encode(FAILURE_REFERENCE_CORPUS, convert_to_numpy=True)
+        f_emb = f_emb / np.maximum(np.linalg.norm(f_emb, axis=1, keepdims=True), 1e-9)
+        n_emb = model.encode(NORMAL_REFERENCE_CORPUS, convert_to_numpy=True)
+        n_emb = n_emb / np.maximum(np.linalg.norm(n_emb, axis=1, keepdims=True), 1e-9)
+
+        sim_f = np.dot(t_emb, f_emb.T)[0]
+        sim_n = np.dot(t_emb, n_emb.T)[0]
+        best_idx = int(np.argmax(sim_f))
+        sim_failure = float(sim_f[best_idx])
+        sim_normal = float(np.max(sim_n))
+        ftype = FAILURE_REFERENCE_TYPES[best_idx]
+
+    if sim_failure > threshold and (sim_failure - sim_normal) > margin:
+        return "FAILURE", "embedding_semantic", ftype
+    return "NORMAL", "normal", "none"
