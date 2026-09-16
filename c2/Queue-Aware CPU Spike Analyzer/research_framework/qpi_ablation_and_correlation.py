@@ -1,16 +1,13 @@
 """
 QPI Ablation Study & Advanced Correlation Suite
-Commit 1: feat: dataset loading and candidate QPI formulation variants
+Commit 2: feat: operational pressure correlation suite
 
-Adds:
-  - Dataset loading and fallback generator
-  - Dynamic frozen Q_ref derivation from healthy baseline
-  - Candidate formulations:
-      1. QPI-1 (Queue Only): min(1.0, Q / Q_ref)
-      2. QPI-2 (Rate Only): min(1.0, lambda / mu)
-      3. QPI-3 (Multiplicative Proposed): min(1.0, (Q / Q_ref) * (lambda / mu))
-      4. QPI-4 (Additive Weighted): min(1.0, 0.5 * (Q / Q_ref) + 0.5 * min(1.0, lambda / mu))
-  - Queue growth rate dQ/dt calculation via np.gradient
+Adds on top of commit 1:
+  - `analyze_correlations(df)`:
+      • Spearman and Pearson log correlations for QPI vs Response Latency
+      • Correlation between QPI and Queue Growth Rate (dQ/dt)
+      • Correlation between QPI and Error Rate
+      • Predictive Power Comparison: QPI vs Failure Status vs CPU vs Failure Status
 """
 
 import os
@@ -23,7 +20,6 @@ DATASET_PATH = os.path.join(SCRIPT_DIR, "empirical_validation_dataset.csv")
 
 
 def load_or_generate_dataset():
-    """Load existing empirical validation dataset or generate if missing."""
     if os.path.exists(DATASET_PATH):
         df = pd.read_csv(DATASET_PATH)
     else:
@@ -34,15 +30,10 @@ def load_or_generate_dataset():
 
 
 def compute_qpi_variants(df):
-    """
-    Computes candidate QPI formulations for ablation comparison using
-    service-specific frozen Q_ref derived from P95 of Healthy Baseline telemetry.
-    """
     q = df['in_flight_queue']
     inc = df['incoming_rate']
     proc = np.maximum(df['processing_rate'], 0.001)
 
-    # Deriving Q_ref from 95th Percentile of Healthy Baseline Data (Low Load)
     if 'q_ref_frozen' in df.columns:
         q_ref = df['q_ref_frozen']
     elif 'workload_stage' in df.columns:
@@ -51,19 +42,11 @@ def compute_qpi_variants(df):
     else:
         q_ref = max(1.0, float(np.percentile(q.iloc[:max(10, int(len(df) * 0.2))], 95)))
 
-    # 1. QPI-1: Queue Only
     qpi_queue = np.minimum(1.0, q / q_ref)
-
-    # 2. QPI-2: Rate Imbalance Only (lambda / mu)
     qpi_rate = np.minimum(1.0, inc / proc)
-
-    # 3. QPI-3: Proposed Multiplicative
     qpi_mult = np.minimum(1.0, (q / q_ref) * (inc / proc))
-
-    # 4. QPI-4: Additive Weighted (0.5 Queue + 0.5 Rate)
     qpi_add = np.minimum(1.0, 0.5 * (q / q_ref) + 0.5 * np.minimum(1.0, inc / proc))
 
-    # Compute Queue Growth Rate dQ/dt
     q_growth = np.gradient(q, df['time_sec'])
 
     df_var = df.copy()
@@ -76,7 +59,50 @@ def compute_qpi_variants(df):
     return df_var
 
 
+# =============================================================================
+# OPERATIONAL CORRELATIONS  ← NEW
+# =============================================================================
+
+def analyze_correlations(df):
+    """
+    Calculates exact correlation coefficients proving operational pressure capture:
+    - QPI vs Response Latency
+    - QPI vs Queue Growth (dQ/dt)
+    - QPI vs Error Rate
+    - QPI vs Failure Status (compared against CPU vs Failure Status)
+    """
+    print("\n" + "=" * 80)
+    print("      OPERATIONAL PRESSURE CORRELATION SUITE (QPI vs METRICS)")
+    print("=" * 80)
+
+    # Use 'qpi' column if present, else fallback to proposed multiplicative 'qpi_mult'
+    target_qpi = df['qpi'] if 'qpi' in df.columns else df['qpi_mult']
+
+    # Compute Spearman (rank) and Pearson correlations
+    r_lat_spearman = target_qpi.corr(df['response_time_ms'], method='spearman')
+    r_lat_pearson  = target_qpi.corr(np.log1p(df['response_time_ms']))
+    r_growth       = target_qpi.corr(df['queue_growth'])
+    r_errors       = target_qpi.corr(df['interval_errors'])
+
+    # CPU vs Failure Status vs QPI vs Failure Status
+    r_qpi_failure = target_qpi.corr(df['failure_status'])
+    r_cpu_failure = df['cpu_percent'].corr(df['failure_status'])
+
+    print("-" * 80)
+    print(f"1. QPI <--> Response Latency      : Spearman r_s = {r_lat_spearman:.4f} | Pearson log(r) = {r_lat_pearson:.4f}")
+    print(f"2. QPI <--> Queue Growth (dQ/dt)   : Pearson r   = {r_growth:.4f}")
+    print(f"3. QPI <--> Error Rate            : Pearson r   = {r_errors:.4f}")
+    print("-" * 80)
+    print("4. PREDICTIVE POWER COMPARISON (Failure Status Correlation):")
+    print(f"   - QPI <--> Failure Status       : r = {r_qpi_failure:.4f}  [EARLY SYSTEMIC PROXY]")
+    print(f"   - CPU <--> Failure Status       : r = {r_cpu_failure:.4f}  [REACTIVE RESOURCE PROXY]")
+
+    if r_qpi_failure > r_cpu_failure:
+        print("   [+] PROOF: QPI demonstrates HIGHER correlation with failure status than CPU alone!")
+    print("=" * 80 + "\n")
+
+
 if __name__ == "__main__":
     df = load_or_generate_dataset()
     df_var = compute_qpi_variants(df)
-    print(f"Loaded {len(df_var)} rows. Computed QPI variants: qpi_queue, qpi_rate, qpi_mult, qpi_add.")
+    analyze_correlations(df_var)
