@@ -320,3 +320,10 @@ def _layer1_keyword(template: str):
     
     confidence = round(min(max(0.6 * base_conf + 0.4 * score_ratio, 0.0), 1.0), 4)
     return confidence
+
+    window_minutes = config.get("window_minutes", 5)
+lookback_delta = pd.Timedelta(minutes=window_minutes)
+
+# Window slice selection inside stage4_sliding_window:
+window_start_ts = current_ts - lookback_delta
+window = grp[(grp["timestamp"] >= window_start_ts) & (grp["timestamp"] < current_ts)]
