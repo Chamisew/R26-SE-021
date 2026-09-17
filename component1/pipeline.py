@@ -305,3 +305,18 @@ def _layer1_keyword(template: str):
         score += 2
 
     return score
+
+    def _compute_confidence(row, mscore, metric_thresh):
+    """Calculate normalized confidence score (0.0 to 1.0) and categories."""
+    layers_agreed = 0
+    layer = str(row.get("detection_layer", ""))
+
+    if "keyword" in layer: layers_agreed += 1
+    if "tfidf" in layer or "embedding" in layer: layers_agreed += 1
+    if "metric" in layer or "fusion" in layer: layers_agreed += 1
+
+    base_conf = layers_agreed / 3.0
+    score_ratio = min(mscore / (metric_thresh * 2), 1.0) if metric_thresh > 0 else 0.5
+    
+    confidence = round(min(max(0.6 * base_conf + 0.4 * score_ratio, 0.0), 1.0), 4)
+    return confidence
