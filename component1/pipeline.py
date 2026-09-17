@@ -279,3 +279,29 @@ def _layer1_keyword(template: str):
 
     backend = CONFIG.get("semantic_backend", "tfidf")
     # Tuning loop logic as implemented in tune_semantic_params
+
+    def _metric_score(row, service_gc_history: dict):
+    """Layer 3: Multi-metric evidence fusion combining RAM, CPU, Heap, and GC."""
+    score = 0
+    ram  = row["ram_percent"]
+    heap = row["heap_mb_used"]
+    cpu  = row["cpu_percent"]
+    gc   = row["gc_count"]
+    svc  = row["service_name"]
+
+    bl = _service_metric_baselines.get(svc, {})
+    ram_threshold = bl.get("threshold_ram", 85.0)
+    heap_threshold = bl.get("threshold_heap", 2500.0)
+
+    if ram > ram_threshold: score += 2
+    if cpu > 85: score += 2
+    if heap > heap_threshold: score += 2
+
+    history = service_gc_history.setdefault(svc, [])
+    history.append(gc)
+    if len(history) > 10:
+        history.pop(0)
+    if len(history) >= 2 and (history[-1] - history[0]) > 3:
+        score += 2
+
+    return score
