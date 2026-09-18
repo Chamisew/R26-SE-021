@@ -37,15 +37,23 @@ from src.model import (
     TARGET_COL,
 )
 from src.ingestion import (
-    COMP2_REQUIRED_COLUMNS,
     COMP2_CPU_FEATURE_COLUMNS,
     COMP3_REQUIRED_COLUMNS,
     DEFAULT_COMP2_CSV,
     DEFAULT_COMP3_CSV,
 )
 from src.xai import generate_enterprise_rca_report
+from src.advisor import policy as _advisor_policy
+from src.advisor import copilot as _advisor_copilot
+from src.advisor.forecast import MAX_TTF_MIN as _ADVISOR_MAX_TTF
 
 logger = logging.getLogger(__name__)
+
+
+def _advisor_ttf_proxy(risk: float) -> float:
+    """Deterministic time-to-failure proxy (minutes) when no forecaster artifact
+    is loaded: high risk => little runway. Mirrors api.py `_ttf_proxy_from_risk`."""
+    return float(max(0.2, min(_ADVISOR_MAX_TTF, (1.0 - float(risk)) * _ADVISOR_MAX_TTF)))
 
 # ── Configuration defaults ────────────────────────────────────────────────────
 # Comp2/Comp3 paths are resolved in src.ingestion relative to the workspace root
@@ -57,30 +65,59 @@ DEFAULT_OUTPUT_PATH = "outputs/live_predictions.jsonl"
 DEFAULT_STATUS_PATH = "outputs/live_status.json"
 DEFAULT_CHECKPOINT_PATH = "outputs/.inference_checkpoint.json"
 DEFAULT_POLL_INTERVAL = 1  # 1-second real-time polling interval
+COMP2_LIVE_REQUIRED_COLUMNS = {"timestamp", *COMP2_CPU_FEATURE_COLUMNS}
+
+# Live-tail streaming configuration.
+# The Comp2 CSV is append-only and can hold hundreds of thousands of historical
+# rows. For a *live* view we must (a) never replay that history and (b) never
+# scan it row-by-row every poll. So the engine keeps a row cursor and, on each
+# poll, parses only the newest LIVE_INFERENCE_BATCH rows at the tail of the file.
+LIVE_INFERENCE_BATCH = 50   # newest rows fed to the model per poll cycle
+LIVE_TAIL_ROWS = 50         # rows shown when the engine cold-starts on a large file
 
 
 class CheckpointManager:
     """
-    Persistent checkpoint that tracks which records have already been processed.
-    Stored as a JSON file separate from the source CSVs.
+    Persistent checkpoint that tracks how far the live tail reader has consumed
+    each source CSV.
+
+    Component 2 uses a ROW CURSOR (an integer count of data rows already seen).
+    The Comp2 CSV is append-only, so a cursor is enough to detect new rows and,
+    crucially, avoids the O(rows x keys) membership scan that made the old
+    key-list approach crawl on large files.
+
+    Component 3 is small, so it keeps composite-key tracking — but backed by a
+    set for O(1) membership checks.
+
     Never modifies the source CSV files.
     """
 
     def __init__(self, checkpoint_path: str = DEFAULT_CHECKPOINT_PATH):
         self.path = checkpoint_path
         self.state = self._load()
+        # Migrate any legacy key-list checkpoint to the cursor model: drop the
+        # (potentially 10 000-entry) comp2_keys list and start the cursor fresh
+        # so the engine jumps straight to the live tail instead of replaying.
+        self.state.pop("comp2_keys", None)
+        self.state.setdefault("comp2_cursor", None)
+        self.state.setdefault("comp3_keys", [])
+        self.state.setdefault("comp3_processed_count", 0)
+        self._comp3_keyset = set(self.state["comp3_keys"])
 
     def _load(self) -> dict:
         if os.path.exists(self.path):
             try:
                 with open(self.path, "r") as f:
                     data = json.load(f)
-                logger.info(f"Checkpoint loaded: {data.get('comp2_processed_count', 0)} Comp2 + "
-                            f"{data.get('comp3_processed_count', 0)} Comp3 records previously processed.")
-                return data
+                if isinstance(data, dict):
+                    logger.info(
+                        f"Checkpoint loaded: cursor={data.get('comp2_cursor')} Comp2, "
+                        f"{data.get('comp3_processed_count', 0)} Comp3 records previously processed."
+                    )
+                    return data
             except (json.JSONDecodeError, IOError) as e:
                 logger.warning(f"Checkpoint file corrupted, starting fresh: {e}")
-        return {"comp2_keys": [], "comp3_keys": [], "comp2_processed_count": 0, "comp3_processed_count": 0}
+        return {"comp2_cursor": None, "comp3_keys": [], "comp3_processed_count": 0}
 
     def save(self) -> None:
         os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
@@ -90,48 +127,59 @@ class CheckpointManager:
         # Atomic rename to prevent corruption
         os.replace(tmp_path, self.path)
 
-    def is_comp2_processed(self, key: str) -> bool:
-        return key in self.state["comp2_keys"]
+    # ── Component 2: row cursor ────────────────────────────────────────────
+    def get_comp2_cursor(self):
+        return self.state.get("comp2_cursor")
 
+    def set_comp2_cursor(self, n: int) -> None:
+        self.state["comp2_cursor"] = int(n)
+        self.state["comp2_processed_count"] = int(n)
+        self.save()
+
+    # ── Component 3: set-backed composite keys ─────────────────────────────
     def is_comp3_processed(self, key: str) -> bool:
-        return key in self.state["comp3_keys"]
-
-    def mark_comp2_processed(self, keys: list[str]) -> None:
-        existing = set(self.state["comp2_keys"])
-        new_keys = [k for k in keys if k not in existing]
-        self.state["comp2_keys"].extend(new_keys)
-        self.state["comp2_processed_count"] += len(new_keys)
-        # Keep only last 10000 keys to bound memory
-        if len(self.state["comp2_keys"]) > 10000:
-            self.state["comp2_keys"] = self.state["comp2_keys"][-10000:]
-        self.save()
-
-    def reset(self) -> None:
-        self.state = {"comp2_keys": [], "comp3_keys": [], "comp2_processed_count": 0, "comp3_processed_count": 0}
-        self.save()
+        return key in self._comp3_keyset
 
     def mark_comp3_processed(self, keys: list[str]) -> None:
-        existing = set(self.state["comp3_keys"])
-        new_keys = [k for k in keys if k not in existing]
+        new_keys = [k for k in keys if k not in self._comp3_keyset]
+        if not new_keys:
+            return
+        self._comp3_keyset.update(new_keys)
         self.state["comp3_keys"].extend(new_keys)
         self.state["comp3_processed_count"] += len(new_keys)
         if len(self.state["comp3_keys"]) > 10000:
             self.state["comp3_keys"] = self.state["comp3_keys"][-10000:]
+            self._comp3_keyset = set(self.state["comp3_keys"])
+        self.save()
+
+    def reset(self) -> None:
+        self.state = {"comp2_cursor": None, "comp3_keys": [], "comp3_processed_count": 0}
+        self._comp3_keyset = set()
         self.save()
 
 
-def safe_read_csv(file_path: str, max_retries: int = 3, retry_delay: float = 2.0) -> Optional[pd.DataFrame]:
+def safe_read_csv(file_path: str, max_retries: int = 3, retry_delay: float = 2.0,
+                  skip_rows: int = 0) -> Optional[pd.DataFrame]:
     """
     Reads a CSV file with retry logic for handling partially-written or locked files.
     Returns None if the file cannot be read after all retries.
     Does NOT modify the source file.
+
+    skip_rows: number of leading DATA rows (after the header) to skip while parsing.
+    Used by the live tail reader so it never parses the whole historical backlog.
     """
     if not os.path.exists(file_path):
         return None
 
+    def _do_read():
+        if skip_rows and skip_rows > 0:
+            # Keep the header (line 0), skip the first skip_rows data rows.
+            return pd.read_csv(file_path, skiprows=lambda i: 0 < i <= skip_rows)
+        return pd.read_csv(file_path)
+
     for attempt in range(max_retries):
         try:
-            df = pd.read_csv(file_path)
+            df = _do_read()
             # Validate that the file was not truncated: check for all-NaN final row
             if len(df) > 0 and df.iloc[-1].isna().all():
                 logger.warning(f"{file_path}: last row is all-NaN (possibly mid-write). Dropping it.")
@@ -174,6 +222,31 @@ def make_comp3_record_key(row: pd.Series) -> str:
     return f"c3:{ts}:{svc}:{proj}"
 
 
+def normalize_comp2_live_schema(df: pd.DataFrame) -> pd.DataFrame:
+    """Normalize current C2 telemetry column names for the C4 inference model."""
+    df = df.copy()
+
+    if "service_name" not in df.columns:
+        if "service" in df.columns:
+            df["service_name"] = df["service"]
+        elif "failing_service" in df.columns:
+            df["service_name"] = df["failing_service"]
+
+    if "queue_pressure_index" not in df.columns and "qpi" in df.columns:
+        df["queue_pressure_index"] = df["qpi"]
+
+    missing = COMP2_LIVE_REQUIRED_COLUMNS - set(df.columns)
+    if "service_name" not in df.columns:
+        missing.add("service_name (or service/failing_service)")
+    if missing:
+        raise ValueError(
+            "Component 2 live dataset is missing required inference columns: "
+            f"{sorted(missing)}"
+        )
+
+    return df
+
+
 def preprocess_comp2_for_inference(df: pd.DataFrame) -> pd.DataFrame:
     """
     Applies the SAME preprocessing used during model training to Component 2 data.
@@ -183,9 +256,9 @@ def preprocess_comp2_for_inference(df: pd.DataFrame) -> pd.DataFrame:
     Preprocessing steps (must match training exactly):
       1. Fill NaN in feature columns: overload_flag → 0 (int), others → 0.0
       2. Parse timestamp to timestamp_dt
-      3. Derive project_id/service_name from failing_service if not present
+      3. Derive project_id when absent; preserve the service identity normalized from C2.
     """
-    df = df.copy()
+    df = normalize_comp2_live_schema(df)
 
     # Parse timestamp (same logic as load_cpu_features)
     if pd.api.types.is_numeric_dtype(df["timestamp"]):
@@ -203,12 +276,25 @@ def preprocess_comp2_for_inference(df: pd.DataFrame) -> pd.DataFrame:
             if m:
                 return f"Proj_{int(m.group(1)):02d}"
             return "Proj_01"
-        df["project_id"] = df["failing_service"].apply(_extract_pid)
+        # Live C2 telemetry may carry the service id as 'failing_service', the
+        # normalized 'service_name', or 'service'. Fall back in that order so a
+        # schema without 'failing_service' (the current C2 live format) does not
+        # raise KeyError during project-id derivation.
+        if "failing_service" in df.columns:
+            pid_source = df["failing_service"]
+        elif "service_name" in df.columns:
+            pid_source = df["service_name"]
+        elif "service" in df.columns:
+            pid_source = df["service"]
+        else:
+            pid_source = pd.Series(["Proj_01"] * len(df), index=df.index)
+        df["project_id"] = pid_source.apply(_extract_pid)
         # Assign per-incident project IDs
-        incident_groups = df[df["incident_id"] > 0]["incident_id"].unique()
+        numeric_incident_ids = pd.to_numeric(df["incident_id"], errors="coerce")
+        incident_groups = df.loc[numeric_incident_ids > 0, "incident_id"].unique()
         for idx, inc_id in enumerate(sorted(incident_groups)):
             mask = df["incident_id"] == inc_id
-            svc_name = df.loc[mask, "failing_service"].dropna() # type: ignore
+            svc_name = pid_source[mask].dropna() # type: ignore
             if len(svc_name) > 0:
                 df.loc[mask, "project_id"] = _extract_pid(svc_name.iloc[0])
         if df["project_id"].nunique() <= 1 and len(incident_groups) == 0:
@@ -430,9 +516,10 @@ class LiveInferenceEngine:
         # 3. Validate schemas (read a small sample)
         comp2_sample = safe_read_csv(self.comp2_path)
         if comp2_sample is not None:
-            missing_comp2 = COMP2_REQUIRED_COLUMNS - set(comp2_sample.columns)
-            if missing_comp2:
-                logger.critical(f"Component 2 CSV missing required columns: {sorted(missing_comp2)}")
+            try:
+                normalize_comp2_live_schema(comp2_sample)
+            except ValueError as e:
+                logger.critical(str(e))
                 return False
             logger.info(f"Component 2 schema valid: {len(comp2_sample)} rows, "
                         f"{len(comp2_sample.columns)} columns")
@@ -446,6 +533,15 @@ class LiveInferenceEngine:
             logger.info(f"Component 3 schema valid: {len(comp3_sample)} rows, "
                         f"{len(comp3_sample.columns)} columns")
 
+        # 4. Ensure live MTTA by service exists
+        try:
+            live_mtta_out = os.path.join(os.path.dirname(self.output_path), "live_mtta_by_service.json")
+            if not os.path.exists(live_mtta_out):
+                from src.live_mtta import compute_live_mtta_by_service
+                compute_live_mtta_by_service(output_path=live_mtta_out)
+        except Exception as e:
+            logger.warning(f"Could not generate live MTTA: {e}")
+
         logger.info(f"Checkpoint: {self.checkpoint.state['comp2_processed_count']} Comp2 + "
                      f"{self.checkpoint.state['comp3_processed_count']} Comp3 records already processed.")
         logger.info(f"Poll interval: {self.poll_interval}s")
@@ -453,38 +549,73 @@ class LiveInferenceEngine:
         logger.info("Startup complete. Entering inference loop.")
         return True
 
+    def _count_data_rows(self, path: str) -> Optional[int]:
+        """Fast newline count of data rows (excludes the header), no CSV parsing.
+        Used so the tail reader can locate new rows without reading the whole
+        historical file every poll. Returns None if the file is unreadable."""
+        if not os.path.exists(path):
+            return None
+        try:
+            with open(path, "rb") as f:
+                f.readline()  # skip header line
+                count = 0
+                for chunk in iter(lambda: f.read(1 << 20), b""):
+                    count += chunk.count(b"\n")
+            return count
+        except OSError as e:
+            logger.warning(f"{path}: row count failed: {e}")
+            return None
+
     def _read_new_comp2(self) -> pd.DataFrame:
-        """Reads Component 2 CSV and returns only NEW (unprocessed) records."""
-        df = safe_read_csv(self.comp2_path)
+        """Return the newest unprocessed Component 2 rows for live inference.
+
+        Uses a row cursor over the append-only CSV: on each poll it counts the
+        data rows, parses only the tail since the cursor, and advances the cursor
+        to end-of-file. A large backlog (e.g. a cold start on a 300k-row history
+        file) is skipped straight to the last ``LIVE_TAIL_ROWS`` rows so the
+        dashboard reflects the live edge instead of replaying old records.
+        """
+        total = self._count_data_rows(self.comp2_path)
+        if total is None or total == 0:
+            return pd.DataFrame()
+
+        cursor = self.checkpoint.get_comp2_cursor()
+        if cursor is None:
+            # Cold start: jump to the live tail, do not replay history.
+            cursor = max(0, total - LIVE_TAIL_ROWS)
+            self.checkpoint.set_comp2_cursor(cursor)
+            logger.info(
+                f"Component 2 cold start: skipping {cursor} historical rows, "
+                f"streaming live tail from row {cursor}."
+            )
+
+        if total <= cursor:
+            if total < cursor:
+                # File shrank (rotated/truncated): restart the cursor at the tail.
+                logger.info("Component 2 CSV shrank (rotated); resetting cursor to live tail.")
+                self.checkpoint.set_comp2_cursor(max(0, total - LIVE_TAIL_ROWS))
+            return pd.DataFrame()
+
+        # Only feed the newest LIVE_INFERENCE_BATCH rows; consume the rest of any
+        # backlog by advancing the cursor to end-of-file below.
+        start = max(cursor, total - LIVE_INFERENCE_BATCH)
+        df = safe_read_csv(self.comp2_path, skip_rows=start)
         if df is None or df.empty:
             return pd.DataFrame()
 
-        # Validate schema
-        missing = COMP2_REQUIRED_COLUMNS - set(df.columns)
-        if missing:
-            logger.warning(f"Component 2 CSV missing columns: {sorted(missing)}. Skipping this read.")
+        try:
+            df = normalize_comp2_live_schema(df)
+        except ValueError as e:
+            logger.warning(f"{e}. Skipping this read.")
             return pd.DataFrame()
 
-        # Filter to unprocessed records
-        new_rows = []
-        for idx, row in df.iterrows():
-            key = make_comp2_record_key(row)
-            if not self.checkpoint.is_comp2_processed(key):
-                new_rows.append(idx)
-
-        if not new_rows and len(df) > 0:
-            logger.info("All records processed. Resetting checkpoint to continuously stream live inference.")
-            self.checkpoint.reset()
-            new_rows = list(df.index)
-
-        if not new_rows:
-            return pd.DataFrame()
-
-        # Process in batch chunks of up to 50 rows for fast real-time updates
-        batch_rows = new_rows[:50]
-        new_df = df.loc[batch_rows].copy().reset_index(drop=True)
-        logger.info(f"Component 2: {len(new_df)} new records streaming for inference (total remaining: {len(new_rows)})")
-        return new_df
+        # Advance cursor so these rows (and any skipped backlog) are not revisited.
+        self.checkpoint.set_comp2_cursor(total)
+        logger.info(
+            f"Component 2: {len(df)} new records streaming for live inference "
+            f"(rows {start + 1}-{total} of {total})."
+        )
+        return df.reset_index(drop=True)
 
     def _read_new_comp3(self) -> pd.DataFrame:
         """Reads Component 3 CSV and returns only NEW (unprocessed) records."""
@@ -510,7 +641,7 @@ class LiveInferenceEngine:
         logger.info(f"Component 3: {len(new_df)} new records detected (total in file: {len(df)})")
         return new_df
 
-    def _run_inference(self, aligned_df: pd.DataFrame, comp2_keys: list[str], comp3_keys: list[str]) -> None:
+    def _run_inference(self, aligned_df: pd.DataFrame, comp3_keys: list[str]) -> None:
         """
         Runs the trained model on aligned data and records predictions.
         """
@@ -570,6 +701,10 @@ class LiveInferenceEngine:
                 proj_id = str(row.get("project_id", "unknown"))
                 source_ts = str(row.get("timestamp", ""))
                 inc_id = row.get("incident_id", 0)
+                try:
+                    output_incident_id = int(inc_id) if pd.notna(inc_id) else 0
+                except (TypeError, ValueError, OverflowError):
+                    output_incident_id = str(inc_id)
                 rca_report = generate_enterprise_rca_report(
                     service_name=svc_name,
                     cpu_failure_prob=cpu_prob,
@@ -578,10 +713,42 @@ class LiveInferenceEngine:
                     model=self.model,
                 )
 
+                # ── Decision Advisor enrichment (additive, backward-compatible) ──
+                # Cost-sensitive top-3 ranking + plain-language brief on the fast
+                # template path only (no TreeExplainer here; the hot loop already
+                # pays for the RCA above). The gating-matrix action stays recorded
+                # in `action_recommended` so existing consumers are unaffected.
+                try:
+                    _risk = max(cpu_prob, mem_prob)
+                    _ttf = _advisor_ttf_proxy(_risk)
+                    _phi = rca_report.get("shapley_phi_values") or {}
+                    _decision = _advisor_policy.decide(
+                        svc_name, cpu_prob=cpu_prob, mem_prob=mem_prob, ttf_p50=_ttf)
+                    _brief = _advisor_copilot.build_brief_template(
+                        svc_name, cpu_prob, _decision.confidence,
+                        _decision.recommended_action, _ttf,
+                        (_ttf * 0.5, _ttf * 1.5), _phi)
+                    advisor_view = {
+                        "recommended_action": _decision.recommended_action,
+                        "confidence": round(_decision.confidence, 4),
+                        "confidence_band": [round(max(0.0, _decision.confidence - 0.15), 3),
+                                            round(min(1.0, _decision.confidence + 0.15), 3)],
+                        "time_to_failure_min": round(_ttf, 3),
+                        "time_to_failure_band": [round(_ttf * 0.5, 3), round(_ttf * 1.5, 3)],
+                        "ranked_actions": _decision.ranked_actions,
+                        "fallback_matrix_action": _decision.fallback_matrix_action,
+                        "requires_operator_approval": _decision.requires_operator_approval,
+                        "needs_human_review": bool(0.45 <= cpu_prob <= 0.65),
+                        "brief": _brief,
+                    }
+                except Exception as _adv_exc:  # never break the live loop
+                    logger.warning(f"advisor enrichment skipped: {_adv_exc}")
+                    advisor_view = None
+
                 prediction_record = {
                     "prediction_timestamp": now_iso,
                     "source_timestamp": source_ts,
-                    "incident_id": int(inc_id) if pd.notna(inc_id) else 0,
+                    "incident_id": output_incident_id,
                     "service_name": svc_name,
                     "project_id": proj_id,
                     "cpu_failure_prob": round(cpu_prob, 6),
@@ -596,6 +763,7 @@ class LiveInferenceEngine:
                     "shapley_phi_values": rca_report["shapley_phi_values"],
                     "sre_runbook_steps": rca_report["sre_runbook_steps"],
                     "incident_ticket_payload": rca_report["incident_ticket_payload"],
+                    "advisor": advisor_view,
                 }
                 predictions.append(prediction_record)
                 f.write(json.dumps(prediction_record) + "\n")
@@ -607,6 +775,12 @@ class LiveInferenceEngine:
                     "cpu_trend_raw": float(row.get("cpu_trend_5min", 0.0)),
                     "mem_leak_raw": mem_prob,
                     "state_machine": str(row.get("system_state", "UNKNOWN")),
+                    # An all-zero Comp2 feature row means no real telemetry was
+                    # reported for this service; the resulting ~0.149 baseline
+                    # probability must be suppressed downstream, not displayed.
+                    "cpu_telemetry_available": bool(
+                        X.iloc[[i]].abs().to_numpy().any()
+                    ),
                 }
 
         # BUG FIX: Rotate live_predictions.jsonl to prevent unbounded file growth.
@@ -646,8 +820,8 @@ class LiveInferenceEngine:
         except Exception as e:
             logger.warning(f"Could not write status file: {e}")
 
-        # Mark records as processed
-        self.checkpoint.mark_comp2_processed(comp2_keys)
+        # Mark Comp3 records as processed. Comp2 is tracked by the row cursor,
+        # already advanced inside _read_new_comp2, so it is not marked here.
         self.checkpoint.mark_comp3_processed(comp3_keys)
 
         # Log summary
@@ -692,8 +866,7 @@ class LiveInferenceEngine:
                     time.sleep(sleep_for)
                     continue
 
-                # 2. Build record keys for checkpoint tracking
-                comp2_keys = [make_comp2_record_key(row) for _, row in comp2_new.iterrows()]
+                # 2. Build Comp3 record keys for checkpoint tracking (Comp2 uses a row cursor)
                 comp3_keys = [make_comp3_record_key(row) for _, row in comp3_new_raw.iterrows()] if not comp3_new_raw.empty else []
 
                 # 3. Preprocess (same pipeline as training)
@@ -711,7 +884,7 @@ class LiveInferenceEngine:
                 aligned = align_comp2_comp3(comp2_processed, comp3_processed)
 
                 # 5. Run inference
-                self._run_inference(aligned, comp2_keys, comp3_keys)
+                self._run_inference(aligned, comp3_keys)
 
             except Exception as e:
                 logger.error(f"Inference cycle error: {e}", exc_info=True)
