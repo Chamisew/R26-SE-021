@@ -373,3 +373,17 @@ def add_memory_change_features(df):
         df.loc[mask_crit_ram, "incident_phase_2"] = 1
 
     return df
+
+    def add_ram_std_trend(df, n_windows=3):
+    """Calculate RAM trend features including moving standard deviation and slope."""
+    if "ram_std" not in df.columns:
+        df['ram_std_trend'] = 0.0
+        return df
+    df = df.copy()
+
+    df['ram_std_trend'] = (
+        df.groupby('service_name', group_keys=False)['ram_std']
+          .transform(lambda s: (s - s.shift(n_windows)) / n_windows)
+          .fillna(0.0)
+    )
+    return df
