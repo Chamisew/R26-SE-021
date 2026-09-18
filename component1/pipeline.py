@@ -349,3 +349,27 @@ def add_memory_change_features(df):
             df.loc[idx, col] = (g["ram_percent"].values - past_ram.fillna(g["ram_percent"]).values)
 
     return df
+
+    def add_incident_phase_columns(df):
+    """Add causal features for pre-failure, failure, recovery, and normal phases."""
+    df = df.copy()
+    if df.empty:
+        df["incident_phase_1"] = 0
+        df["incident_phase_2"] = 0
+        return df
+
+    if "memory_change_5min" not in df.columns:
+        df = add_memory_change_features(df)
+
+    df["incident_phase_1"] = 0
+    df["incident_phase_2"] = 0
+
+    if "memory_change_5min" in df.columns and "ram_percent" in df.columns:
+        mask_early = (df["memory_change_5min"] > 5) & (df["ram_percent"] > 70)
+        df.loc[mask_early, "incident_phase_1"] = 1
+
+    if "ram_percent" in df.columns:
+        mask_crit_ram = df["ram_percent"] > 85
+        df.loc[mask_crit_ram, "incident_phase_2"] = 1
+
+    return df
