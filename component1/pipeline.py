@@ -327,3 +327,25 @@ lookback_delta = pd.Timedelta(minutes=window_minutes)
 # Window slice selection inside stage4_sliding_window:
 window_start_ts = current_ts - lookback_delta
 window = grp[(grp["timestamp"] >= window_start_ts) & (grp["timestamp"] < current_ts)]
+
+def add_memory_change_features(df):
+    """Calculate RAM and Heap growth across past lookback periods."""
+    df = df.copy()
+    df["memory_change_5min"] = 0.0
+    df["memory_change_10min"] = 0.0
+    if df.empty or "ram_percent" not in df.columns:
+        return df
+
+    df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
+
+    for _, group in df.groupby("service_name"):
+        g = group.sort_values("timestamp").copy()
+        idx = g.index
+        ram_series = g.set_index("timestamp")["ram_percent"]
+
+        for minutes, col in ((5, "memory_change_5min"), (10, "memory_change_10min")):
+            target_ts = g["timestamp"] - pd.Timedelta(minutes=minutes)
+            past_ram = pd.Series(target_ts.values, index=idx).apply(lambda ts: ram_series.asof(ts))
+            df.loc[idx, col] = (g["ram_percent"].values - past_ram.fillna(g["ram_percent"]).values)
+
+    return df
