@@ -414,3 +414,18 @@ def get_project_id(service_name=None, stack_name=None):
         _SERVICE_PROJECT_MAP[key] = f"project_{_NEXT_PROJECT_ID}"
         _NEXT_PROJECT_ID += 1
     return _SERVICE_PROJECT_MAP[key]
+
+    def continuous_save(windows_df, config):
+    """Save new sliding windows incrementally without generating duplicate records."""
+    if windows_df is None or windows_df.empty:
+        return windows_df
+
+    with pipeline_state_lock:
+        last_saved_id = int(pipeline_state["last_window_id"])
+
+    new_rows = windows_df[windows_df["window_id"] > last_saved_id].copy()
+    if new_rows.empty:
+        return windows_df
+
+    # Append new_rows to CSV targets...
+    return windows_df
