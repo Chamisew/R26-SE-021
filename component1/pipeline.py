@@ -400,3 +400,17 @@ def add_memory_change_features(df):
     df['is_failure'] = (df['hybrid_label'] == 'FAILURE').astype(int)
     # Rollup logic as implemented in add_failure_trends
     return df
+
+    _SERVICE_PROJECT_MAP = {}
+_NEXT_PROJECT_ID = 1
+
+def get_project_id(service_name=None, stack_name=None):
+    """Generate consistent project identifiers per service/stack."""
+    global _NEXT_PROJECT_ID
+    key = (service_name or stack_name or "unknown").strip()
+    if not key:
+        key = "unknown"
+    if key not in _SERVICE_PROJECT_MAP:
+        _SERVICE_PROJECT_MAP[key] = f"project_{_NEXT_PROJECT_ID}"
+        _NEXT_PROJECT_ID += 1
+    return _SERVICE_PROJECT_MAP[key]
