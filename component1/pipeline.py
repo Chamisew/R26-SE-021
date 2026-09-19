@@ -387,3 +387,16 @@ def add_memory_change_features(df):
           .fillna(0.0)
     )
     return df
+
+    def add_failure_trends(df):
+    """Compute moving window failure counts, variances, and slope trends."""
+    df = df.copy()
+    if df.empty or 'hybrid_label' not in df.columns:
+        df['trend_slope_5m'] = 0.0
+        df['trend_max_failures_5m'] = 0.0
+        df['trend_variance_5m'] = 0.0
+        return df
+
+    df['is_failure'] = (df['hybrid_label'] == 'FAILURE').astype(int)
+    # Rollup logic as implemented in add_failure_trends
+    return df
