@@ -442,3 +442,15 @@ def get_project_id(service_name=None, stack_name=None):
             enriched[col] = np.nan
 
     return enriched[FINAL_ML_COLS]
+
+    def print_evaluation(windows_df, raw_df):
+    """Compute and print evaluation metrics including Precision, Recall, F1, and Confusion Matrix."""
+    y_true = (windows_df["ground_truth_label"] == "FAILURE").astype(int)
+    y_pred = (windows_df["hybrid_label"] == "FAILURE").astype(int)
+
+    prec = precision_score(y_true, y_pred, zero_division=0)
+    rec  = recall_score(y_true, y_pred, zero_division=0)
+    f1   = f1_score(y_true, y_pred, zero_division=0)
+    cm   = confusion_matrix(y_true, y_pred)
+    
+    print(f"Precision: {prec:.4f} | Recall: {rec:.4f} | F1: {f1:.4f}")
