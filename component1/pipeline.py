@@ -429,3 +429,16 @@ def get_project_id(service_name=None, stack_name=None):
 
     # Append new_rows to CSV targets...
     return windows_df
+
+    def build_ml_dataframe(windows_df):
+    """Build and format final ML dataset with strict column ordering."""
+    enriched = windows_df.copy()
+    enriched = add_ram_std_trend(enriched)
+    enriched = add_memory_change_features(enriched)
+    enriched = add_incident_phase_columns(enriched)
+
+    for col in FINAL_ML_COLS:
+        if col not in enriched.columns:
+            enriched[col] = np.nan
+
+    return enriched[FINAL_ML_COLS]
