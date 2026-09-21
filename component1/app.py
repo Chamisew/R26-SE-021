@@ -32,3 +32,24 @@ class SharedState:
 
 
 STATE = SharedState()
+
+SERVICES_CONFIG_PATH = Path(__file__).resolve().parent / "services_config.json"
+
+
+def _read_services_config() -> dict[str, Any]:
+    """Safely load configured services from services_config.json."""
+    try:
+        with SERVICES_CONFIG_PATH.open(encoding="utf-8") as config_file:
+            config = json.load(config_file)
+    except FileNotFoundError:
+        return {"services": []}
+    except (OSError, json.JSONDecodeError) as exc:
+        raise HTTPException(
+            status_code=500, detail=f"Cannot read services configuration: {exc}"
+        ) from exc
+
+    if not isinstance(config, dict) or not isinstance(config.get("services", []), list):
+        raise HTTPException(
+            status_code=500, detail="services_config.json has an invalid format"
+        )
+    return config
