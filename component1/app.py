@@ -53,3 +53,16 @@ def _read_services_config() -> dict[str, Any]:
             status_code=500, detail="services_config.json has an invalid format"
         )
     return config
+
+    def _write_services_config(config: dict[str, Any]) -> None:
+    """Safely write updated service configuration back to services_config.json."""
+    try:
+        with SERVICES_CONFIG_PATH.open("w", encoding="utf-8") as config_file:
+            json.dump(config, config_file, indent=2)
+            config_file.write("\n")
+    except OSError as exc:
+        raise HTTPException(
+            status_code=500, detail=f"Cannot save services configuration: {exc}"
+        ) from exc
+
+        
