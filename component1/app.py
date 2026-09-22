@@ -72,3 +72,15 @@ class AzureServiceInput(BaseModel):
     name: str = Field(..., min_length=1, max_length=64, description="Service container name")
     base_url: HttpUrl = Field(..., description="HTTP base endpoint URL of sidecar")
     enabled: bool = Field(default=True, description="Service enabled flag")
+
+
+    @app.get("/api/azure-services")
+def api_azure_services() -> list[dict[str, Any]]:
+    """Return all configured Azure microservice sidecars."""
+    return _read_services_config()["services"]
+
+
+@app.get("/api/services-config")
+def api_services_config() -> dict[str, Any]:
+    """Read-only view of services_config.json for configuration tab."""
+    return _read_services_config()
