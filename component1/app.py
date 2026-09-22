@@ -65,4 +65,10 @@ def _read_services_config() -> dict[str, Any]:
             status_code=500, detail=f"Cannot save services configuration: {exc}"
         ) from exc
 
-        
+SERVICE_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+
+
+class AzureServiceInput(BaseModel):
+    name: str = Field(..., min_length=1, max_length=64, description="Service container name")
+    base_url: HttpUrl = Field(..., description="HTTP base endpoint URL of sidecar")
+    enabled: bool = Field(default=True, description="Service enabled flag")
