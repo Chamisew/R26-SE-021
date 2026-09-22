@@ -351,7 +351,7 @@ def test_stale_cpu_measurement_is_not_carried(isolated_status_files):
     import src.api as api_module
     status_file = isolated_status_files["LIVE_STATUS_FILE"]
     svc = "srv-cpu-stale"
-    old = datetime.now(timezone.utc) - timedelta(seconds=api_module.CPU_CARRY_MAX_AGE_SEC + 5)
+    old = datetime.now(timezone.utc) - timedelta(seconds=api_module.CPU_CARRY_MAX_AGE_SEC + 5) # type: ignore
     _seed_loop_record(status_file, svc, old.isoformat())
 
     with TestClient(app) as client:
