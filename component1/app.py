@@ -84,3 +84,52 @@ def api_azure_services() -> list[dict[str, Any]]:
 def api_services_config() -> dict[str, Any]:
     """Read-only view of services_config.json for configuration tab."""
     return _read_services_config()
+
+    @app.post("/api/azure-services")
+def api_add_azure_service(service: AzureServiceInput) -> dict[str, Any]:
+    """Validate, health check, and register a new Azure sidecar service."""
+    name = service.name.strip()
+    if not SERVICE_NAME_PATTERN.fullmatch(name):
+        raise HTTPException(
+            status_code=422,
+            detail="Service name may contain only letters, numbers, dots, underscores, and hyphens.",
+        )
+
+    base_url = str(service.base_url).rstrip("/")
+    verified = False
+    verification_notes = []
+
+    try:
+        metrics_resp = requests.get(f"{base_url}/metrics", timeout=6.0)
+        if metrics_resp.status_code == 200:
+            verified = True
+            verification_notes.append("/metrics returned HTTP 200")
+        else:
+            verification_notes.append(f"/metrics returned HTTP {metrics_resp.status_code}")
+    except requests.RequestException as exc:
+        verification_notes.append(f"/metrics unreachable: {exc}")
+
+    config = _read_services_config()
+    config["services"] = [
+        item for item in config.get("services", [])
+        if isinstance(item, dict) and item.get("name") != name
+    ]
+    config["services"].append({"name": name, "base_url": base_url, "enabled": service.enabled})
+    _write_services_config(config)
+
+    with STATE.lock:
+        if name not in STATE.active_containers and service.enabled:
+            STATE.active_containers = sorted(STATE.active_containers + [name])
+
+    msg = f"Service '{name}' saved to services_config.json."
+    if verified:
+        msg += " Endpoint verified and active."
+    else:
+        msg += f" Note: remote check details: {'; '.join(verification_notes)}"
+
+    return {
+        "status": "saved",
+        "verified": verified,
+        "service": {"name": name, "base_url": base_url, "enabled": service.enabled},
+        "message": msg,
+    }
