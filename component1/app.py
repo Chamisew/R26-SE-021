@@ -133,3 +133,27 @@ def api_add_azure_service(service: AzureServiceInput) -> dict[str, Any]:
         "service": {"name": name, "base_url": base_url, "enabled": service.enabled},
         "message": msg,
     }
+
+    @app.delete("/api/azure-services/{service_name}")
+def api_delete_azure_service(service_name: str) -> dict[str, Any]:
+    """Delete a service entry from services_config.json."""
+    name = service_name.strip()
+    config = _read_services_config()
+    services_list = config.get("services", [])
+    before_len = len(services_list)
+    config["services"] = [s for s in services_list if isinstance(s, dict) and s.get("name") != name]
+
+    if len(config["services"]) == before_len:
+        raise HTTPException(
+            status_code=404, detail=f"Service '{name}' not found in services_config.json."
+        )
+
+    _write_services_config(config)
+    with STATE.lock:
+        STATE.active_containers = [s for s in STATE.active_containers if s != name]
+
+    return {
+        "status": "deleted",
+        "service_name": name,
+        "message": f"Service '{name}' removed from services_config.json.",
+    }
