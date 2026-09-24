@@ -157,3 +157,29 @@ def api_delete_azure_service(service_name: str) -> dict[str, Any]:
         "service_name": name,
         "message": f"Service '{name}' removed from services_config.json.",
     }
+
+    @app.get("/api/status")
+def api_status() -> dict[str, Any]:
+    """Fetch current API, pipeline state, and active containers."""
+    try:
+        configured = [
+            s["name"] for s in _read_services_config().get("services", [])
+            if isinstance(s, dict) and s.get("name") and s.get("enabled", True)
+        ]
+    except Exception:
+        configured = []
+
+    with STATE.lock:
+        data_seen = {r.get("service_name") for r in STATE.raw_rows if r.get("service_name")}
+        merged_services = sorted(set(configured) | set(STATE.active_containers) | data_seen)
+        return {
+            "status": STATE.status,
+            "mode": STATE.mode,
+            "uptime_seconds": int(time.time() - STATE.started_at),
+            "total_rows_collected": STATE.total_rows_collected,
+            "total_windows_generated": STATE.total_windows_generated,
+            "last_global_window_id": STATE.last_global_window_id,
+            "active_containers": merged_services,
+            "configured_services": configured,
+            "last_error": STATE.last_error,
+        }
