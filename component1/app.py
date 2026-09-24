@@ -183,3 +183,14 @@ def api_status() -> dict[str, Any]:
             "configured_services": configured,
             "last_error": STATE.last_error,
         }
+
+        @app.get("/api/live-metrics")
+def api_live_metrics(limit: int = Query(default=50, ge=1, le=500)) -> list[dict[str, Any]]:
+    """Retrieve recent raw telemetry and log records."""
+    if not isinstance(limit, int):
+        limit = 50
+
+    with STATE.lock:
+        if not STATE.raw_rows:
+            return []
+        return list(STATE.raw_rows[:limit])
