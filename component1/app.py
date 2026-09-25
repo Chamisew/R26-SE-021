@@ -221,3 +221,45 @@ def api_windows(limit: int = Query(default=50, ge=1, le=1000)) -> list[dict[str,
     except Exception:
         pass
     return []
+@app.get("/api/templates")
+def api_templates() -> list[dict[str, Any]]:
+    """Retrieve top mined log templates and failure flag association."""
+    with STATE.lock:
+        if not STATE.raw_rows:
+            return []
+        raw_df = pd.DataFrame(STATE.raw_rows)
+
+    if raw_df.empty:
+        return []
+
+    if "log_template" not in raw_df.columns or raw_df["log_template"].dropna().empty:
+        if "log_message" in raw_df.columns:
+            raw_df["log_template"] = raw_df["log_message"].apply(
+                lambda m: re.sub(r"\d+", "<*>", str(m))
+            )
+        else:
+            return []
+
+    if "hybrid_label" in raw_df.columns:
+        grouped = (
+            raw_df.groupby("log_template")
+            .agg(
+                count=("log_template", "size"),
+                failure_related=("hybrid_label", lambda s: bool((s == "FAILURE").any())),
+            )
+            .reset_index()
+            .sort_values("count", ascending=False)
+            .head(20)
+        )
+    else:
+        grouped = (
+            raw_df.groupby("log_template")
+            .size()
+            .rename("count")
+            .reset_index()
+            .assign(failure_related=False)
+            .sort_values("count", ascending=False)
+            .head(20)
+        )
+    grouped.rename(columns={"log_template": "template"}, inplace=True)
+    return _df_to_records(grouped[["template", "count", "failure_related"]])
