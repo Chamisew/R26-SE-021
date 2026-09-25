@@ -263,3 +263,78 @@ def api_templates() -> list[dict[str, Any]]:
         )
     grouped.rename(columns={"log_template": "template"}, inplace=True)
     return _df_to_records(grouped[["template", "count", "failure_related"]])
+
+@app.get("/api/stats")
+def api_stats() -> dict[str, Any]:
+    """Calculate summary pipeline metrics, per-service F1 scores, and layer distributions."""
+    with STATE.lock:
+        if not STATE.windows_rows:
+            return {
+                "total_windows": 0,
+                "failure_windows": 0,
+                "normal_windows": 0,
+                "failure_percent": 0.0,
+                "failure_rate": 0.0,
+                "layer_contribution": {"keyword": 0, "tfidf_semantic": 0, "metric_fusion": 0},
+                "per_service_f1": {},
+                "overall_f1": None,
+                "trend_5m": [],
+            }
+        wdf = pd.DataFrame(STATE.windows_rows)
+
+    total_windows = len(wdf)
+    if "ground_truth_label" in wdf.columns and wdf["ground_truth_label"].isin(["FAILURE", "NORMAL"]).any():
+        failure_windows = int((wdf["ground_truth_label"] == "FAILURE").sum())
+        normal_windows = int((wdf["ground_truth_label"] == "NORMAL").sum())
+    else:
+        failure_windows = int((wdf["hybrid_label"] == "FAILURE").sum())
+        normal_windows = total_windows - failure_windows
+    failure_percent = (failure_windows / total_windows * 100.0) if total_windows > 0 else 0.0
+
+    layers = wdf["detection_layer"].astype(str)
+    layer_contribution = {
+        "keyword": int(layers.str.contains("keyword", na=False).sum()),
+        "tfidf_semantic": int(layers.str.contains("tfidf_semantic", na=False).sum()),
+        "metric_fusion": int(layers.str.contains("metric_fusion", na=False).sum()),
+    }
+
+    has_gt = wdf["ground_truth_label"].isin(["FAILURE", "NORMAL"]).any()
+    per_service_f1: dict[str, float | None] = {}
+    for svc, grp in wdf.groupby("service_name"):
+        svc_has_gt = grp["ground_truth_label"].isin(["FAILURE", "NORMAL"]).any()
+        if not svc_has_gt:
+            per_service_f1[str(svc)] = None
+        else:
+            y_true = (grp["ground_truth_label"] == "FAILURE").astype(int)
+            y_pred = (grp["hybrid_label"] == "FAILURE").astype(int)
+            per_service_f1[str(svc)] = float(f1_score(y_true, y_pred, zero_division=0))
+
+    overall_f1 = float(f1_score(
+        (wdf["ground_truth_label"] == "FAILURE").astype(int),
+        (wdf["hybrid_label"] == "FAILURE").astype(int),
+        zero_division=0
+    )) if has_gt else None
+
+    trend_5m = []
+    if "timestamp" in wdf.columns:
+        wdf["timestamp"] = pd.to_datetime(wdf["timestamp"], errors="coerce")
+        five_mins_ago = pd.Timestamp.now() - pd.Timedelta(minutes=5)
+        recent_wdf = wdf[wdf["timestamp"] >= five_mins_ago].copy()
+        if not recent_wdf.empty:
+            recent_wdf["minute"] = recent_wdf["timestamp"].dt.floor("Min")
+            recent_wdf["is_fail"] = (recent_wdf["hybrid_label"] == "FAILURE").astype(int)
+            trend_df = recent_wdf.groupby("minute")["is_fail"].sum().reset_index()
+            for _, r in trend_df.iterrows():
+                trend_5m.append({"time": r["minute"].strftime("%H:%M"), "failures": int(r["is_fail"])})
+
+    return {
+        "total_windows": total_windows,
+        "failure_windows": failure_windows,
+        "normal_windows": normal_windows,
+        "failure_percent": round(failure_percent, 2),
+        "failure_rate": round(failure_percent, 2),
+        "layer_contribution": layer_contribution,
+        "per_service_f1": per_service_f1,
+        "overall_f1": overall_f1,
+        "trend_5m": trend_5m,
+    }
