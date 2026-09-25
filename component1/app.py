@@ -194,3 +194,30 @@ def api_live_metrics(limit: int = Query(default=50, ge=1, le=500)) -> list[dict[
         if not STATE.raw_rows:
             return []
         return list(STATE.raw_rows[:limit])
+
+        @app.get("/api/windows")
+def api_windows(limit: int = Query(default=50, ge=1, le=1000)) -> list[dict[str, Any]]:
+    """Retrieve processed feature window records with historical fallback."""
+    with STATE.lock:
+        if STATE.windows_rows:
+            return [{k: _sanitize_value(v) for k, v in row.items()} for row in STATE.windows_rows[-limit:]]
+
+    try:
+        out_csv = os.path.join(pipeline.CONFIG.get("output_dir", "output/"), "pipeline_output.csv")
+        if os.path.exists(out_csv):
+            df = pd.read_csv(out_csv)
+            if not df.empty:
+                recent_df = df.tail(limit)
+                records = _df_to_records(recent_df)
+                with STATE.lock:
+                    if not STATE.windows_rows:
+                        STATE.windows_rows = records
+                        STATE.total_windows_generated = len(df)
+                        if "window_id" in df.columns:
+                            valid_ids = pd.to_numeric(df["window_id"], errors="coerce").dropna()
+                            if not valid_ids.empty:
+                                STATE.last_global_window_id = int(valid_ids.max())
+                return records
+    except Exception:
+        pass
+    return []
