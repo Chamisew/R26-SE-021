@@ -411,4 +411,34 @@ def api_component3_feed(since_window_id: int = Query(default=0, ge=0)) -> dict[s
         "windows": enriched_windows,
     }
 
-    
+    @app.websocket("/ws/live")
+async def ws_live(websocket: WebSocket) -> None:
+    """Stream live telemetry updates and trigger immediate failure alerts."""
+    await websocket.accept()
+    try:
+        while True:
+            metrics = api_live_metrics(50)
+            with STATE.lock:
+                active_svcs = list(STATE.active_containers)
+            await websocket.send_json({
+                "type": "metrics_update",
+                "data": metrics,
+                "active_services": active_svcs,
+            })
+
+            for row in metrics:
+                if row.get("hybrid_label") == "FAILURE":
+                    alert = {
+                        "type": "failure_alert",
+                        "service_name": row.get("service_name"),
+                        "failure_type": row.get("failure_type"),
+                        "hybrid_label": row.get("hybrid_label"),
+                        "ram_percent": row.get("ram_percent"),
+                        "timestamp": row.get("timestamp"),
+                    }
+                    await websocket.send_json(alert)
+
+            await asyncio.sleep(3)
+    except (WebSocketDisconnect, Exception):
+        return
+        
