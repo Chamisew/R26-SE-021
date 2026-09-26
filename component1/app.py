@@ -441,4 +441,22 @@ async def ws_live(websocket: WebSocket) -> None:
             await asyncio.sleep(3)
     except (WebSocketDisconnect, Exception):
         return
-        
+
+        def _sanitize_value(v: Any) -> Any:
+    """Convert NaN, Infinity, and non-serializable pandas/numpy types to JSON safe values."""
+    if v is None:
+        return None
+    try:
+        if pd.isna(v):
+            return None
+    except Exception:
+        pass
+    if isinstance(v, (np.floating, float)):
+        if np.isinf(v) or np.isnan(v):
+            return None
+        return float(v)
+    if isinstance(v, (np.integer, int)):
+        return int(v)
+    if isinstance(v, (pd.Timestamp, datetime)):
+        return v.isoformat()
+    return v
