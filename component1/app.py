@@ -338,3 +338,77 @@ def api_stats() -> dict[str, Any]:
         "overall_f1": overall_f1,
         "trend_5m": trend_5m,
     }
+
+    @app.get("/api/component3/feed")
+def api_component3_feed(since_window_id: int = Query(default=0, ge=0)) -> dict[str, Any]:
+    """Provide feature feed and dataset stream for Component 3 ingestion."""
+    windows = pipeline.get_new_windows_since(since_window_id)
+
+    if not windows:
+        with STATE.lock:
+            if not STATE.windows_rows:
+                return {"last_window_id": since_window_id, "new_windows_count": 0, "windows": []}
+            wdf = pd.DataFrame(STATE.windows_rows)
+
+        new_df = wdf[wdf["window_id"] > since_window_id].sort_values("window_id")
+        if new_df.empty:
+            return {"last_window_id": since_window_id, "new_windows_count": 0, "windows": []}
+
+        if "memory_change_5min" not in new_df.columns:
+            new_df = pipeline.build_ml_dataframe(new_df)
+        elif "project_id" not in new_df.columns:
+            new_df["project_id"] = new_df["service_name"].apply(pipeline.get_project_id)
+        if "label" not in new_df.columns and "hybrid_label" in new_df.columns:
+            new_df["label"] = new_df["hybrid_label"]
+
+        windows = _df_to_records(new_df)
+
+    enriched_windows = []
+    for w in windows:
+        ew = dict(w)
+
+        if "project_id" not in ew or not ew["project_id"] or pd.isna(ew["project_id"]):
+            svc = ew.get("service_name") or ew.get("stack")
+            if svc:
+                ew["project_id"] = pipeline.get_project_id(svc)
+        if "label" not in ew and "hybrid_label" in ew:
+            ew["label"] = ew["hybrid_label"]
+        elif "hybrid_label" not in ew and "label" in ew:
+            ew["hybrid_label"] = ew["label"]
+
+        for min_str in ["5m", "10m"]:
+            slope_key = f"trend_slope_{min_str}"
+            alias_slope_key = f"trend_{min_str}_slope"
+
+            if slope_key in ew:
+                ew[alias_slope_key] = ew[slope_key]
+            elif alias_slope_key in ew:
+                ew[slope_key] = ew[alias_slope_key]
+            else:
+                ew[slope_key] = 0.0
+                ew[alias_slope_key] = 0.0
+
+        if "trend_max_failures_5m" in ew:
+            ew["trend_max_failures"] = ew["trend_max_failures_5m"]
+        elif "trend_max_failures" not in ew:
+            ew["trend_max_failures"] = None
+
+        if "trend_variance_5m" in ew:
+            ew["trend_variance"] = ew["trend_variance_5m"]
+        elif "trend_variance" not in ew:
+            ew["trend_variance"] = None
+
+        sanitized_ew = {k: _sanitize_value(v) for k, v in ew.items()}
+        enriched_windows.append(sanitized_ew)
+
+    last_window_id = since_window_id
+    if enriched_windows:
+        last_window_id = int(max((w.get("window_id") or since_window_id) for w in enriched_windows))
+
+    return {
+        "last_window_id": last_window_id,
+        "new_windows_count": len(enriched_windows),
+        "windows": enriched_windows,
+    }
+
+    
