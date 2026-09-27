@@ -463,3 +463,81 @@ async def ws_live(websocket: WebSocket) -> None:
 # Metrics Route Query Parameter Bounds: limit: int = Query(default=50, ge=1, le=500)
 # Windows Route Query Parameter Bounds: limit: int = Query(default=50, ge=1, le=1000)
 # Feed Route Query Parameter Bounds: since_window_id: int = Query(default=0, ge=0)
+
+def _pipeline_worker() -> None:
+    """Execute live collection or CSV batch execution asynchronously in background."""
+    with STATE.lock:
+        STATE.status = "running"
+        STATE.started_at = time.time()
+        mode = STATE.mode
+
+    if mode == "live":
+        def run_collector():
+            while True:
+                try:
+                    duration_minutes = PIPELINE_DURATION_MINUTES
+                    if hasattr(pipeline, "stage1_collect_azure_sidecar"):
+                        pipeline.CONFIG["live_duration_minutes"] = duration_minutes
+                        pipeline.stage1_collect_azure_sidecar(duration_minutes=duration_minutes)
+                    elif hasattr(pipeline, "stage1_collect_live"):
+                        cfg = dict(pipeline.CONFIG)
+                        cfg["live_duration_minutes"] = duration_minutes
+                        pipeline.stage1_collect_live(duration_minutes=duration_minutes)
+                    else:
+                        raise AttributeError("No live collector exists in pipeline.py")
+                except SystemExit as se:
+                    with STATE.lock:
+                        STATE.status = "stopped"
+                        STATE.last_error = f"Collector thread exited (SystemExit: {se.code})"
+                    break
+                except BaseException as exc:
+                    with STATE.lock:
+                        STATE.status = "stopped"
+                        STATE.last_error = f"Collector thread failed: {str(exc)}"
+
+                if PIPELINE_DURATION_MINUTES > 0:
+                    time.sleep(2)
+                else:
+                    break
+
+        collector_thread = threading.Thread(target=run_collector, daemon=True)
+        collector_thread.start()
+
+        while True:
+            with pipeline.pipeline_state_lock:
+                raw_df = pipeline.pipeline_state.get("raw_df")
+                win_df = pipeline.pipeline_state.get("windows_df")
+                pipe_configured = pipeline.pipeline_state.get("configured_services", [])
+
+            try:
+                file_configured = [
+                    s["name"] for s in _read_services_config().get("services", [])
+                    if isinstance(s, dict) and s.get("name") and s.get("enabled", True)
+                ]
+            except Exception:
+                file_configured = []
+
+            all_configured = sorted(set(pipe_configured) | set(file_configured))
+
+            with STATE.lock:
+                if raw_df is not None and not raw_df.empty:
+                    STATE.raw_rows = _prepare_metric_records(raw_df, limit=500)
+                    STATE.total_rows_collected = len(raw_df)
+                    data_seen = {r.get("service_name") for r in STATE.raw_rows if r.get("service_name")}
+                    STATE.active_containers = sorted(set(all_configured) | data_seen)
+                elif all_configured:
+                    STATE.active_containers = all_configured
+
+                if win_df is not None and not win_df.empty:
+                    STATE.windows_rows = _df_to_records(win_df.tail(200))
+                    STATE.total_windows_generated = len(win_df)
+                    if "window_id" in win_df.columns:
+                        try:
+                            valid_ids = pd.to_numeric(win_df["window_id"], errors="coerce").dropna()
+                            if not valid_ids.empty:
+                                STATE.last_global_window_id = int(valid_ids.max())
+                        except Exception:
+                            pass
+                if STATE.status != "stopped":
+                    STATE.status = "running"
+            time.sleep(2)
