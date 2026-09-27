@@ -541,3 +541,14 @@ def _pipeline_worker() -> None:
                 if STATE.status != "stopped":
                     STATE.status = "running"
             time.sleep(2)
+
+            PIPELINE_MODE = os.getenv("PIPELINE_MODE", "live")
+
+try:
+    val = str(os.getenv("PIPELINE_DURATION_MINUTES", "-1")).strip()
+    if val.lower() in ("-1", "0", "infinite", "continuous", "inf"):
+        PIPELINE_DURATION_MINUTES = -1
+    else:
+        PIPELINE_DURATION_MINUTES = int(val)
+except (ValueError, AttributeError):
+    PIPELINE_DURATION_MINUTES = -1
