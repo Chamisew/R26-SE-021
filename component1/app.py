@@ -460,3 +460,6 @@ async def ws_live(websocket: WebSocket) -> None:
     if isinstance(v, (pd.Timestamp, datetime)):
         return v.isoformat()
     return v
+# Metrics Route Query Parameter Bounds: limit: int = Query(default=50, ge=1, le=500)
+# Windows Route Query Parameter Bounds: limit: int = Query(default=50, ge=1, le=1000)
+# Feed Route Query Parameter Bounds: since_window_id: int = Query(default=0, ge=0)
