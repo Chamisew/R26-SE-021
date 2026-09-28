@@ -10,6 +10,10 @@ research_framework/ml_ready_dataset.csv
 *.csv
 *.log
 
+# Explicitly keep Dashboard data files
+!Dashboard/data/*
+!Dashboard/data/**
+
 # Node.js
 node_modules/
 npm-debug.log*
@@ -44,3 +48,4 @@ Thumbs.db
 .docker/
 cpu_spike_predictor/outputs/live_log.jsonl
 cpu_spike_predictor/outputs/live_status.json
+
