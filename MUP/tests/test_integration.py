@@ -27,13 +27,13 @@ SCRIPTS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__fil
 sys.path.insert(0, SCRIPTS_DIR)
 
 from feature_engineering import compute_derived_features, BASE_FEATURES, ALL_FEATURES
-
+#class TestComputeDerivedFeatures(unittest.TestCase):
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 COMP1_DATA = os.path.abspath(os.path.join(BASE, "..", "component1", "output", "ml_ready_dataset.csv"))
 COMP1_CONFIG = os.path.abspath(os.path.join(BASE, "..", "component1", "services_config.json"))
 MODEL_PATH = os.path.join(BASE, "models", "memory_leak_rf_model.pkl")
 
-
+#class TestComputeDerivedFeatures(unittest.TestCase):
 class TestFullPipeline(unittest.TestCase):
     """End-to-end: load CSV → filter → engineer features → predict → write output."""
 
