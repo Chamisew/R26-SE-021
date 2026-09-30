@@ -10,6 +10,7 @@ Validates:
   6. Output CSV schemas (live_feed.csv, memory_predictions.csv).
 """
 
+
 import sys
 import os
 import json
@@ -28,8 +29,10 @@ sys.path.insert(0, SCRIPTS_DIR)
 from feature_engineering import BASE_FEATURES, ALL_FEATURES, compute_derived_features
 
 # Import testable functions from simulate_live
+
 import simulate_live
 
+# class TestComputeDerivedFeatures(unittest.TestCase):
 
 class TestDeriveAlertReason(unittest.TestCase):
     """Test SHAP-based and fallback reason derivation."""
@@ -123,7 +126,6 @@ class TestSendPredictionPayload(unittest.TestCase):
             "svc", "proj", 0.5, "FALSE", "NORMAL"
         )
         self.assertFalse(success)
-
 
 class TestPerServiceDeque(unittest.TestCase):
     """Test bounded per-service history (deque with maxlen)."""
