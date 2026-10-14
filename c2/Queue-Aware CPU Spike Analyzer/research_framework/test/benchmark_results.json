@@ -1,0 +1,81 @@
+{
+  "status": "success",
+  "results": [
+    {
+      "model_name": "Model A (CPU Only)",
+      "model": "Model A (CPU Only)",
+      "precision": 0.9615384615384616,
+      "recall": 0.8333333333333334,
+      "f1_score": 0.8928571428571429,
+      "f1": 0.8928571428571429,
+      "threshold": 0.5,
+      "fp": 1,
+      "fn": 5,
+      "lead_time": 0,
+      "mean_lead_s": 0,
+      "false_alarms_per_hour": 1.0,
+      "accuracy": 0.9523809523809523
+    },
+    {
+      "model_name": "Model B (CPU + Load Signals)",
+      "model": "Model B (CPU + Load Signals)",
+      "precision": 1.0,
+      "recall": 0.8333333333333334,
+      "f1_score": 0.9090909090909091,
+      "f1": 0.9090909090909091,
+      "threshold": 0.5,
+      "fp": 0,
+      "fn": 5,
+      "lead_time": 0,
+      "mean_lead_s": 0,
+      "false_alarms_per_hour": 0.0,
+      "accuracy": 0.9603174603174603
+    },
+    {
+      "model_name": "Model C (CPU + Queue Dynamics)",
+      "model": "Model C (CPU + Queue Dynamics)",
+      "precision": 1.0,
+      "recall": 0.8333333333333334,
+      "f1_score": 0.9090909090909091,
+      "f1": 0.9090909090909091,
+      "threshold": 0.867720995465651,
+      "fp": 0,
+      "fn": 5,
+      "lead_time": 0,
+      "mean_lead_s": 0,
+      "false_alarms_per_hour": 0.0,
+      "accuracy": 0.9603174603174603
+    },
+    {
+      "model_name": "Model D (CPU + QPI)",
+      "model": "Model D (CPU + QPI)",
+      "precision": 0.9615384615384616,
+      "recall": 0.8333333333333334,
+      "f1_score": 0.8928571428571429,
+      "f1": 0.8928571428571429,
+      "threshold": 0.5,
+      "fp": 1,
+      "fn": 5,
+      "lead_time": 0,
+      "mean_lead_s": 0,
+      "false_alarms_per_hour": 1.0,
+      "accuracy": 0.9523809523809523
+    },
+    {
+      "model_name": "Model E (Full Queue-Aware)",
+      "model": "Model E (Full Queue-Aware)",
+      "precision": 1.0,
+      "recall": 0.8333333333333334,
+      "f1_score": 0.9090909090909091,
+      "f1": 0.9090909090909091,
+      "threshold": 0.0780743368574364,
+      "fp": 0,
+      "fn": 5,
+      "lead_time": 0,
+      "mean_lead_s": 0,
+      "false_alarms_per_hour": 0.0,
+      "accuracy": 0.9603174603174603
+    }
+  ],
+  "timestamp": 1791909708.773759
+}
