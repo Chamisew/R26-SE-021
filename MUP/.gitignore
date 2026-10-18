@@ -1,0 +1,50 @@
+﻿# ==========================================
+# Python & Environment
+# ==========================================
+venv/
+venv*/
+env/
+.env
+.venv/
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyd
+
+# ==========================================
+# IDEs & Tooling
+# ==========================================
+.qoder/
+.qodo/
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ==========================================
+# Runtime Generated Logs
+# ==========================================
+logs/*.log
+logs/*.csv
+*.log
+
+# ==========================================
+# Runtime Generated Data & Predictions
+# ==========================================
+data/memory_predictions.csv
+data/*_predictions.csv
+data/runtime_*.csv
+
+# ==========================================
+# Operating System files
+# ==========================================
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ==========================================
+# Keep essential folders tracked in git
+# ==========================================
+!data/.gitkeep
+!logs/.gitkeep
+!models/.gitkeep

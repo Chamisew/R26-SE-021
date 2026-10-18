@@ -1,0 +1,9 @@
+dashboard-ui/node_modules
+dashboard-ui/dist
+__pycache__
+*.pyc
+!data/
+!data/*
+!data/**
+!*.csv
+!*.json

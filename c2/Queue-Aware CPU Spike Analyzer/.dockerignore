@@ -1,0 +1,28 @@
+# Dependency & Build Artifacts
+node_modules/
+frontend/node_modules/
+frontend/dist/
+venv/
+research_framework/venv/
+.venv/
+__pycache__/
+*.pyc
+
+# Data & Logging Cache
+*.csv
+!research_framework/empirical_validation_dataset.csv
+!research_framework/final_research_dataset.csv
+*.png
+*.log
+
+# Git & IDE Metadata
+.git/
+.github/
+.vscode/
+.idea/
+.DS_Store
+
+# Temporary & Deployment Files
+deploy/
+scratch/
+artifacts/

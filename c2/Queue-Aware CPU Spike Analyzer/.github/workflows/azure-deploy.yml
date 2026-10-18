@@ -1,0 +1,55 @@
+name: Deploy to Azure Container Apps
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    env:
+      RESOURCE_GROUP: rg-queue-aware-analyzer
+      APP_NAME: queue-analyzer
+      LOCATION: southeastasia
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Log in to Azure
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Deploy Azure Infrastructure (Bicep)
+        uses: azure/arm-deploy@v2
+        id: deploy-bicep
+        with:
+          subscriptionId: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          resourceGroupName: ${{ env.RESOURCE_GROUP }}
+          template: ./deploy/azure/main.bicep
+          parameters: appName=${{ env.APP_NAME }} location=${{ env.LOCATION }}
+
+      - name: Build & Push Container Image to ACR
+        run: |
+          ACR_NAME=$(az acr list --resource-group ${{ env.RESOURCE_GROUP }} --query "[0].name" -o tsv)
+          az acr build --registry $ACR_NAME --image queue-analyzer-dashboard:${{ github.sha }} --image queue-analyzer-dashboard:latest .
+
+      - name: Deploy to Azure Container App
+        run: |
+          ACR_SERVER=$(az acr list --resource-group ${{ env.RESOURCE_GROUP }} --query "[0].loginServer" -o tsv)
+          az containerapp update \
+            --name "app-${{ env.APP_NAME }}" \
+            --resource-group ${{ env.RESOURCE_GROUP }} \
+            --image "${ACR_SERVER}/queue-analyzer-dashboard:latest"
+
+      - name: Show Live URL
+        run: |
+          FQDN=$(az containerapp show --name "app-${{ env.APP_NAME }}" --resource-group ${{ env.RESOURCE_GROUP }} --query "properties.configuration.ingress.fqdn" -o tsv)
+          echo "🚀 Live Application URL: https://${FQDN}"

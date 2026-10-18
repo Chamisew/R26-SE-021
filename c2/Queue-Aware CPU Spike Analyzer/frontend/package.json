@@ -1,0 +1,20 @@
+{
+  "name": "queue-aware-cpu-spike-analyzer-web",
+  "version": "2.0.0",
+  "private": true,
+  "description": "React web console for the Queue-Aware CPU Spike Analyzer (Vite build output in dist/ is served by the Python backend).",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --port 5173 --strictPort",
+    "build": "vite build",
+    "preview": "vite preview --port 5173"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.4",
+    "vite": "^5.4.0"
+  }
+}
