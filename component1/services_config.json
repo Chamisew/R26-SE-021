@@ -1,0 +1,35 @@
+{
+  "_comment": "Configured microservices. Local entries use the mock sidecar; hosted entries use Azure Container Apps.",
+  "services": [
+    {
+      "name": "microservice-22",
+      "base_url": "https://microservice-22.purplerock-65a942d2.canadacentral.azurecontainerapps.io",
+      "enabled": true
+    },
+    {
+      "name": "microservice-21",
+      "base_url": "https://microservice-21.purplerock-65a942d2.canadacentral.azurecontainerapps.io",
+      "enabled": true
+    },
+    {
+      "name": "microservice-24",
+      "base_url": "https://microservice-24.purplerock-65a942d2.canadacentral.azurecontainerapps.io",
+      "enabled": true
+    },
+    {
+      "name": "microservice-25",
+      "base_url": "https://microservice-25.purplerock-65a942d2.canadacentral.azurecontainerapps.io",
+      "enabled": true
+    },
+    {
+      "name": "Microservice-20",
+      "base_url": "https://microservice-20.onrender.com",
+      "enabled": true
+    },
+    {
+      "name": "microservice-23",
+      "base_url": "https://microservice-23.purplerock-65a942d2.canadacentral.azurecontainerapps.io",
+      "enabled": true
+    }
+  ]
+}
