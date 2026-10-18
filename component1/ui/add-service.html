@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Add Service - Memory Failure Detection</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: 'Inter', sans-serif; background: #f0f4f8; min-height: 100vh; }
+
+    .page { max-width: 900px; margin: 0 auto; padding: 2rem; }
+
+    /* Header */
+    .page-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.5rem; }
+    .page-header h1 { font-size: 1.5rem; font-weight: 800; color: #1a1a2e; }
+    .btn { padding: 0.5rem 1rem; border-radius: 8px; font-size: 0.85rem; font-weight: 600; cursor: pointer; border: 1px solid #e2e8f0; background: #fff; color: #1a1a2e; transition: all 0.15s ease; }
+    .btn:hover { background: #f8fafc; border-color: #cbd5e1; }
+    .btn-primary { background: #2563eb; color: #fff; border-color: #2563eb; }
+    .btn-primary:hover { background: #1d4ed8; }
+
+    /* Info banner */
+    .info-banner { background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 8px; padding: 0.75rem 1rem; margin-bottom: 1.5rem; font-size: 0.85rem; color: #1e40af; }
+
+    /* Form card */
+    .form-card { background: #fff; border: 1px solid #e2e8f0; border-radius: 12px; padding: 1.5rem; margin-bottom: 1.5rem; box-shadow: 0 1px 3px rgba(0,0,0,0.06); }
+    .form-card h2 { font-size: 1rem; font-weight: 700; color: #1a1a2e; margin-bottom: 1rem; }
+    .form-group { margin-bottom: 1rem; }
+    .form-group label { display: block; font-size: 0.8rem; font-weight: 600; color: #64748b; margin-bottom: 0.35rem; }
+    .form-group input { width: 100%; padding: 0.6rem 0.85rem; border: 1px solid #e2e8f0; border-radius: 8px; font-size: 0.9rem; font-family: 'Inter', sans-serif; outline: none; transition: border-color 0.15s ease; }
+    .form-group input:focus { border-color: #2563eb; }
+    .form-actions { display: flex; gap: 0.75rem; margin-top: 1.25rem; }
+
+    /* Services list */
+    .services-section { background: #fff; border: 1px solid #e2e8f0; border-radius: 12px; padding: 1.5rem; box-shadow: 0 1px 3px rgba(0,0,0,0.06); }
+    .services-section h2 { font-size: 1rem; font-weight: 700; color: #1a1a2e; margin-bottom: 1rem; }
+    .service-item { display: flex; align-items: center; justify-content: space-between; padding: 0.75rem; border: 1px solid #e2e8f0; border-radius: 8px; margin-bottom: 0.5rem; }
+    .service-item:last-child { margin-bottom: 0; }
+    .service-info { flex: 1; min-width: 0; }
+    .service-name { font-size: 0.85rem; font-weight: 600; color: #1a1a2e; }
+    .service-url { font-size: 0.75rem; color: #64748b; margin-top: 0.15rem; word-break: break-all; }
+    .service-status { font-size: 0.7rem; font-weight: 600; padding: 0.2rem 0.5rem; border-radius: 4px; margin-right: 0.75rem; }
+    .service-status.active { background: #dcfce7; color: #16a34a; }
+    .service-status.inactive { background: #fee2e2; color: #dc2626; }
+    .btn-delete { padding: 0.35rem 0.75rem; border-radius: 6px; font-size: 0.75rem; font-weight: 600; cursor: pointer; border: 1px solid rgba(220,38,38,0.3); background: rgba(248,113,113,0.1); color: #dc2626; transition: all 0.15s ease; }
+    .btn-delete:hover { background: rgba(248,113,113,0.2); }
+
+    .empty-state { text-align: center; padding: 2rem; color: #94a3b8; font-size: 0.85rem; }
+
+    /* Back link */
+    .back-link { display: inline-flex; align-items: center; gap: 0.35rem; font-size: 0.85rem; color: #2563eb; text-decoration: none; margin-bottom: 1rem; font-weight: 600; }
+    .back-link:hover { text-decoration: underline; }
+
+    /* Message */
+    .message { font-size: 0.8rem; margin-top: 0.5rem; padding: 0.5rem 0.75rem; border-radius: 6px; }
+    .message.success { background: #dcfce7; color: #16a34a; }
+    .message.error { background: #fee2e2; color: #dc2626; }
+  </style>
+</head>
+<body>
+
+<div class="page">
+
+  <a href="index.html" class="back-link">
+    <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg>
+    Back to Dashboard
+  </a>
+
+  <!-- Header -->
+  <div class="page-header">
+    <h1>Add Service</h1>
+    <a href="index.html" class="btn">Back</a>
+  </div>
+
+  <!-- Info banner -->
+  <div class="info-banner">
+    Add a new service URL — the service will be saved to <code>services_config.json</code> and monitored by Component 1 for memory failure detection.
+  </div>
+
+  <!-- Add Service Form -->
+  <div class="form-card">
+    <h2>Connect a New Service</h2>
+    <form id="addServiceForm" onsubmit="handleAddService(event)">
+      <div class="form-group">
+        <label for="serviceName">Service name</label>
+        <input type="text" id="serviceName" placeholder="e.g. my-service" required maxlength="64">
+      </div>
+      <div class="form-group">
+        <label for="serviceUrl">Service URL</label>
+        <input type="url" id="serviceUrl" placeholder="https://your-service-url.com" required>
+      </div>
+      <div class="form-actions">
+        <button type="button" class="btn" onclick="window.location.href='index.html'">Cancel</button>
+        <button type="submit" class="btn btn-primary">Verify and Add Service</button>
+      </div>
+    </form>
+    <div id="addServiceMessage" class="message" style="display:none;"></div>
+  </div>
+
+  <!-- Existing Services -->
+  <div class="services-section">
+    <h2>Configured Services</h2>
+    <div id="servicesListContainer">
+      <div class="empty-state">Loading services...</div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+const API_BASE = (window.location.origin && window.location.origin.startsWith("http")) ? window.location.origin : "http://localhost:8001";
+
+document.addEventListener("DOMContentLoaded", () => {
+  loadServicesList();
+});
+
+async function handleAddService(event) {
+  event.preventDefault();
+  const nameInput = document.getElementById("serviceName");
+  const urlInput = document.getElementById("serviceUrl");
+  const messageEl = document.getElementById("addServiceMessage");
+
+  const name = nameInput.value.trim();
+  const url = urlInput.value.trim();
+
+  if (!name) {
+    showMessage("Please enter a service name", "error");
+    return;
+  }
+  if (!url || !url.startsWith("http")) {
+    showMessage("Please enter a valid URL", "error");
+    return;
+  }
+
+  try {
+    showMessage("Saving and verifying service with backend...", "success");
+
+    const payload = {
+      name: name,
+      base_url: url,
+      enabled: true
+    };
+
+    const res = await fetch(`${API_BASE}/api/azure-services`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+
+    const result = await res.json();
+    if (!res.ok) {
+      throw new Error(result.detail || "Failed to add service");
+    }
+
+    showMessage(result.message || `Service "${name}" added successfully! Component 1 is now monitoring it live.`, "success");
+    nameInput.value = "";
+    urlInput.value = "";
+    loadServicesList();
+
+  } catch (err) {
+    showMessage("Error: " + err.message, "error");
+  }
+}
+
+async function loadServicesList() {
+  const container = document.getElementById("servicesListContainer");
+  try {
+    const res = await fetch(`${API_BASE}/api/azure-services`);
+    if (!res.ok) throw new Error("Backend offline or unable to load services");
+    const services = await res.json();
+
+    if (!services || services.length === 0) {
+      container.innerHTML = '<div class="empty-state">No services configured yet.</div>';
+      return;
+    }
+
+    container.innerHTML = services.map(svc => {
+      const isActive = svc.enabled !== false;
+      return `
+        <div class="service-item">
+          <div class="service-info">
+            <div class="service-name">${escapeHtml(svc.name)}</div>
+            <div class="service-url">${escapeHtml(svc.base_url)}</div>
+          </div>
+          <span class="service-status ${isActive ? 'active' : 'inactive'}">${isActive ? 'Active' : 'Inactive'}</span>
+          <button class="btn-delete" onclick="deleteService('${escapeHtml(svc.name)}')">Delete</button>
+        </div>
+      `;
+    }).join("");
+  } catch (err) {
+    container.innerHTML = `<div class="empty-state">Failed to load services: ${escapeHtml(err.message)}</div>`;
+  }
+}
+
+async function deleteService(name) {
+  if (!confirm(`Delete service "${name}"?`)) return;
+  try {
+    const res = await fetch(`${API_BASE}/api/azure-services/${encodeURIComponent(name)}`, {
+      method: "DELETE"
+    });
+    const result = await res.json();
+    if (!res.ok) throw new Error(result.detail || "Failed to delete service");
+    showMessage(result.message || `Service "${name}" removed.`, "success");
+    loadServicesList();
+  } catch (err) {
+    showMessage("Error: " + err.message, "error");
+  }
+}
+
+function detectPlatform(url) {
+  const u = url.toLowerCase();
+  if (u.includes("python") || u.includes("flask") || u.includes("django")) return "python";
+  if (u.includes("node") || u.includes("express")) return "node";
+  if (u.includes("java") || u.includes("spring")) return "java";
+  if (u.includes("golang") || u.includes("-go")) return "go";
+  if (u.includes("dotnet")) return "dotnet";
+  if (u.includes("php")) return "php";
+  if (u.includes("ruby") || u.includes("rails")) return "ruby";
+  return "generic";
+}
+
+function showMessage(msg, type) {
+  const el = document.getElementById("addServiceMessage");
+  el.textContent = msg;
+  el.className = "message " + type;
+  el.style.display = "block";
+}
+
+function escapeHtml(str) {
+  if (!str) return "";
+  return String(str).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+</script>
+</body>
+</html>
