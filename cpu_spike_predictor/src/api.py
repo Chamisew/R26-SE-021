@@ -135,6 +135,9 @@ class PredictionResponse(BaseModel):
     rca_narrative: str = ""
     feature_contributions: dict[str, float] = Field(default_factory=dict)
     shapley_phi_values: dict[str, float] = Field(default_factory=dict)
+    # 'treeshap' when exact TreeExplainer values, 'approximate' for the
+    # importance-weighted deviation path in src.xai (compat field name kept).
+    attribution_method: str = "approximate"
     sre_runbook_steps: list[str] = Field(default_factory=list)
     incident_ticket_payload: dict = Field(default_factory=dict)
     mitigation_executed: dict = Field(default_factory=dict)
@@ -188,6 +191,7 @@ class AdvisorDecisionResponse(BaseModel):
     time_to_failure: dict
     brief: str
     brief_method: str
+    attribution_method: str = "approximate"
     rationale: str
     latency_ms: float
     timestamp: str
@@ -404,6 +408,7 @@ def predict(payload: TelemetryPayload):
             "rca_narrative": carried.get("rca_narrative") or "",
             "feature_contributions": carried.get("feature_contributions") or {},
             "shapley_phi_values": carried.get("shapley_phi_values") or {},
+            "attribution_method": carried.get("attribution_method") or "approximate",
             "sre_runbook_steps": carried.get("sre_runbook_steps") or [],
             "incident_ticket_payload": carried.get("incident_ticket_payload") or {},
         }
@@ -452,6 +457,7 @@ def predict(payload: TelemetryPayload):
         rca_narrative=rca_report["rca_narrative"],
         feature_contributions=rca_report["feature_contributions"],
         shapley_phi_values=rca_report["shapley_phi_values"],
+        attribution_method=rca_report.get("attribution_method", "approximate"),
         sre_runbook_steps=rca_report["sre_runbook_steps"],
         incident_ticket_payload=rca_report["incident_ticket_payload"],
         mitigation_executed=mitigation_res,
@@ -576,7 +582,8 @@ def advisor_decide(req: AdvisorDecisionRequest):
         req.service_name, risk=cpu_prob, confidence=decision.confidence,
         action=decision.recommended_action, ttf_p50=ttf["p50"],
         ttf_band=(ttf["p10"], ttf["p90"]), phi=_phi,
-        needs_human_review=needs_review, allow_llm=req.allow_llm_brief)
+        needs_human_review=needs_review, allow_llm=req.allow_llm_brief,
+        attribution_method=_method)
 
     resp = AdvisorDecisionResponse(
         service_name=req.service_name,
@@ -595,6 +602,7 @@ def advisor_decide(req: AdvisorDecisionRequest):
         time_to_failure=ttf,
         brief=brief_res["brief"],
         brief_method=brief_res["method"],
+        attribution_method=_method,
         rationale=decision.rationale,
         latency_ms=(time.perf_counter() - start) * 1000.0,
         timestamp=datetime.utcnow().isoformat(),
@@ -706,6 +714,274 @@ def advisor_chat_suggestions():
     """Return suggested question chips for the chat UI."""
     from src.advisor.chat import SUGGESTED_QUESTIONS
     return {"suggestions": SUGGESTED_QUESTIONS}
+
+
+# ══════════════════════════════════════════════════════════════════════════
+#  PER-SERVICE EXPLAINABILITY & MITIGATION (Phase 1) — READ-ONLY endpoints.
+#  None of these may call execute_mitigation_action or mutate model/policy
+#  state; they only surface what the prediction/mitigation engines recorded.
+# ══════════════════════════════════════════════════════════════════════════
+
+UNAVAILABLE = "unavailable"
+
+# Ladder mirrors src.mitigation exactly: same commands, shown as PREVIEW only.
+MITIGATION_TIERS = [
+    {"tier": 1, "label": "Tier 1 — Envoy load shedding",
+     "detail": "Rate-limit ingress, drop 25% of non-critical traffic (reversible)",
+     "command": "envoy-cli rate-limit set --service={svc} --drop-ratio=0.25"},
+    {"tier": 2, "label": "Tier 2 — Scale out / proactive replacement",
+     "detail": "kubectl scale +2 replicas, or gracefully replace the pod",
+     "command": "kubectl scale deployment/{svc} --replicas=+2"},
+    {"tier": 3, "label": "Tier 3 — Drain & rolling restart",
+     "detail": "Isolate traffic, drain pod, rolling restart deployment",
+     "command": "kubectl rollout restart deployment/{svc} && kubectl label pod -l app={svc} status=drain"},
+]
+
+
+def _normalize_circuit_breaker(raw: str | None, tier: int, cooldown_remaining: int) -> str:
+    """Collapse src.mitigation's display strings to the three canonical states."""
+    s = (raw or "").upper()
+    if s.startswith("STANDBY") or tier <= 0:
+        return "STANDBY"
+    if s.startswith("CLOSED") or (tier > 0 and cooldown_remaining > 0):
+        return "CLOSED"
+    if "ACTIVE" in s:
+        return "ACTIVE"
+    return "STANDBY"
+
+
+def _tier_from_label(raw: str | None) -> int:
+    s = raw or ""
+    if "TIER_" in s:
+        digit = s.split("TIER_", 1)[1][:1]
+        if digit.isdigit():
+            return int(digit)
+    return 0
+
+
+class CauseFactor(BaseModel):
+    feature: str
+    display_name: str
+    contribution_pct: float | None = None
+    phi: float | None = None
+
+
+class ServiceExplanationResponse(BaseModel):
+    service_name: str
+    data_available: bool
+    reason: str = ""
+    attribution_method: str = "approximate"
+    severity: str = UNAVAILABLE
+    impact_radius: str = UNAVAILABLE
+    impact_radius_note: str = ""
+    impact_radius_heuristic: str = UNAVAILABLE
+    primary_cause: CauseFactor | None = None
+    secondary_cause: CauseFactor | None = None
+    rca_narrative: str = ""
+    feature_contributions: dict[str, float] = Field(default_factory=dict)
+    shapley_phi_values: dict[str, float] = Field(default_factory=dict)
+    runbook_id: str = "RB-04"
+    runbook_checklist: list[str] = Field(default_factory=list)
+    runbook_steps: list[str] = Field(default_factory=list)
+    incident_ticket_payload: dict = Field(default_factory=dict)
+    pagerduty_payload: dict = Field(default_factory=dict)
+    servicenow_payload: dict = Field(default_factory=dict)
+    source_timestamp: str = ""
+    generated_at: str = ""
+
+
+class ServiceMitigationResponse(BaseModel):
+    service_name: str
+    data_available: bool
+    reason: str = ""
+    status: str = UNAVAILABLE
+    active_tier: int = 0
+    tiers: list[dict] = Field(default_factory=lambda: list(MITIGATION_TIERS))
+    circuit_breaker: str = "STANDBY"
+    cooldown_remaining_sec: int = 0
+    cooldown_total_sec: int = 180
+    command_preview: str | None = None
+    simulated: bool = True
+    source: str = "none"
+    generated_at: str = ""
+
+
+class MitigationHistoryResponse(BaseModel):
+    service_name: str
+    entries: list[dict] = Field(default_factory=list)
+    count: int = 0
+    note: str = ""
+
+
+@app.get("/api/services/{service}/explanation", response_model=ServiceExplanationResponse)
+def service_explanation(service: str):
+    """Read-only RCA explanation for one service, assembled from the latest
+    live-status record. Missing data is rendered as 'unavailable', never zeros."""
+    from src.advisor.copilot import RUNBOOK_BY_ACTION, RUNBOOK_CHECKLISTS
+    from src.xai import FEATURE_DISPLAY_NAMES
+
+    rec = _read_live_status().get(service)
+    if not isinstance(rec, dict):
+        raise HTTPException(status_code=404, detail=f"No telemetry record for '{service}'.")
+
+    contributions = rec.get("feature_contributions") or {}
+    phi = rec.get("shapley_phi_values") or {}
+    telemetry_ok = bool(rec.get("cpu_telemetry_available", True))
+    # A flat contribution map (every feature identical) is the placeholder the
+    # model emits for all-zero telemetry rows — never present it as an analysis.
+    placeholder = bool(contributions) and len({round(float(v), 3) for v in contributions.values()}) <= 1
+    data_available = telemetry_ok and not placeholder
+    reason = "" if data_available else (
+        "no CPU telemetry measured for this service" if not telemetry_ok
+        else "feature attribution is placeholder data (uniform contributions)")
+
+    method = rec.get("attribution_method") or "approximate"
+
+    sorted_feats = sorted(contributions.items(), key=lambda kv: kv[1], reverse=True) if data_available else []
+
+    def _cause(idx) -> CauseFactor | None:
+        if len(sorted_feats) <= idx:
+            return None
+        feat, pct = sorted_feats[idx]
+        return CauseFactor(feature=feat,
+                           display_name=FEATURE_DISPLAY_NAMES.get(feat, feat),
+                           contribution_pct=round(float(pct), 1),
+                           phi=round(float(phi.get(feat, 0.0)), 4))
+
+    ticket = rec.get("incident_ticket_payload") or {}
+    severity = ticket.get("severity") or rec.get("state_machine") or UNAVAILABLE
+    heuristic_radius = ticket.get("impact_radius") or UNAVAILABLE
+
+    advisor = rec.get("advisor") or {}
+    action = advisor.get("recommended_action") or rec.get("action_recommended") or "NO_ACTION"
+    # Gating-matrix names differ from advisor action names; unify them.
+    action = {"TRIGGER_LOAD_SHEDDING": "LOAD_SHEDDING",
+              "TRIGGER_PROACTIVE_POD_RESTART": "PROACTIVE_RESTART",
+              "CRITICAL_RESTART_AND_TRAFFIC_REROUTE": "CRITICAL_RESTART_AND_REROUTE"}.get(action, action)
+    runbook_id = RUNBOOK_BY_ACTION.get(action, "RB-04")
+
+    sev_map = {"CRITICAL": "critical", "WARNING": "warning", "NOMINAL": "info",
+               "HEALTHY": "info"}
+    pd_severity = sev_map.get(str(severity).upper(), "info")
+    pagerduty_payload = {
+        "event_action": "trigger",
+        "dedup_key": ticket.get("ticket_id", ""),
+        "payload": {
+            "summary": f"[{severity}] {service}: CPU failure risk "
+                       f"{rec.get('cpu_failure_prob', UNAVAILABLE)}",
+            "severity": pd_severity,
+            "source": service,
+            "timestamp": rec.get("prediction_timestamp", ""),
+            "custom_details": {k: v for k, v in ticket.items() if k != "recommended_runbook_steps"},
+        },
+        "note": "SIMULATED payload preview — not sent to PagerDuty",
+    }
+    servicenow_payload = {
+        "short_description": f"[{severity}] {service} — predicted CPU spike (Sentinel AIOps)",
+        "cmdb_ci": service,
+        "urgency": {"critical": "H1", "warning": "H2", "info": "H3"}.get(pd_severity, "H3"),
+        "severity": {"critical": "S1", "warning": "S2", "info": "S3"}.get(pd_severity, "S3"),
+        "contact_type": "monitoring",
+        "description": ticket.get("summary", ""),
+        "worknotes": " | ".join(ticket.get("recommended_runbook_steps", [])[:3]),
+        "note": "SIMULATED payload preview — not filed in ServiceNow",
+    }
+
+    return ServiceExplanationResponse(
+        service_name=service,
+        data_available=data_available,
+        reason=reason,
+        attribution_method=method,
+        severity=severity,
+        impact_radius=UNAVAILABLE,
+        impact_radius_note="No real topology/dependency source exists in this deployment; "
+                           "impact radius cannot be derived. Not shown rather than invented.",
+        impact_radius_heuristic=heuristic_radius,
+        primary_cause=_cause(0),
+        secondary_cause=_cause(1),
+        rca_narrative=rec.get("rca_narrative") or "",
+        feature_contributions=contributions if data_available else {},
+        shapley_phi_values=phi if data_available else {},
+        runbook_id=runbook_id,
+        runbook_checklist=RUNBOOK_CHECKLISTS.get(runbook_id, []),
+        runbook_steps=rec.get("sre_runbook_steps") or [],
+        incident_ticket_payload=ticket,
+        pagerduty_payload=pagerduty_payload,
+        servicenow_payload=servicenow_payload,
+        source_timestamp=rec.get("prediction_timestamp", ""),
+        generated_at=datetime.now(timezone.utc).isoformat(),
+    )
+
+
+@app.get("/api/services/{service}/mitigation", response_model=ServiceMitigationResponse)
+def service_mitigation(service: str):
+    """Read-only view of the REAL mitigation state (tier, cooldown, circuit
+    breaker). This endpoint never executes or mutates anything."""
+    import time as _time
+    from src.mitigation import _SERVICE_STATE, COOLDOWN_SECONDS
+
+    now = _time.time()
+    state = _SERVICE_STATE.get(service)
+    if isinstance(state, dict):
+        tier = int(state.get("tier", 0))
+        elapsed = now - float(state.get("last_action_ts", 0.0) or 0.0)
+        remaining = max(0, int(COOLDOWN_SECONDS - elapsed)) if state.get("last_action_ts") else 0
+        breaker = _normalize_circuit_breaker(None, tier, remaining)
+        status = "HEALTHY" if tier == 0 else ("COOLDOWN_ACTIVE" if remaining > 0 else "ACTIVE")
+        source = "process_state"
+        reason = ""
+        data_available = True
+    else:
+        rec = _read_live_status().get(service) or {}
+        snap = rec.get("mitigation_executed") or {}
+        if snap:
+            tier = _tier_from_label(snap.get("mitigation_tier"))
+            remaining = int(snap.get("cooldown_remaining_sec") or 0)
+            breaker = _normalize_circuit_breaker(snap.get("circuit_breaker"), tier, remaining)
+            status = snap.get("status") or UNAVAILABLE
+            source = "status_snapshot"
+            reason = "API process has no live state for this service; showing last persisted snapshot"
+            data_available = True
+        else:
+            tier, remaining, breaker, status = 0, 0, "STANDBY", UNAVAILABLE
+            source, reason, data_available = "none", "no mitigation record for this service", False
+
+    preview = None
+    if tier >= 1:
+        preview = MITIGATION_TIERS[min(tier, 3) - 1]["command"].format(svc=service)
+        if tier == 2:
+            advisor_action = (((_read_live_status().get(service) or {}).get("advisor")
+                               ) or {}).get("recommended_action")
+            if advisor_action == "PROACTIVE_RESTART":
+                preview = f"kubectl delete pod -l app={service} --grace-period=30"
+
+    return ServiceMitigationResponse(
+        service_name=service,
+        data_available=data_available,
+        reason=reason,
+        status=status,
+        active_tier=tier,
+        tiers=list(MITIGATION_TIERS),
+        circuit_breaker=breaker,
+        cooldown_remaining_sec=remaining,
+        cooldown_total_sec=COOLDOWN_SECONDS,
+        command_preview=preview,
+        simulated=True,
+        source=source,
+        generated_at=datetime.now(timezone.utc).isoformat(),
+    )
+
+
+@app.get("/api/services/{service}/mitigation/history", response_model=MitigationHistoryResponse)
+def service_mitigation_history(service: str):
+    """Read-only mitigation history from src.mitigation.get_mitigation_history
+    (in-memory, bounded to the last 20 escalations per service)."""
+    from src.mitigation import get_mitigation_history
+    entries = list(get_mitigation_history(service) or [])
+    note = "" if entries else ("History lives in the prediction API process memory; "
+                               "it is empty until an escalation occurs (and resets on restart).")
+    return MitigationHistoryResponse(service_name=service, entries=entries,
+                                     count=len(entries), note=note)
 
 
 if __name__ == "__main__":
