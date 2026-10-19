@@ -85,6 +85,14 @@ def load_model(filepath: str = "outputs/cpu_rf_model.joblib") -> RandomForestCla
         raise FileNotFoundError(f"No model found at {filepath}")
     logger.info(f"Loading model from {filepath}...")
     model = joblib.load(filepath)
+    # The model was trained with n_jobs=-1. At inference time (single rows in the
+    # API, small batches in the live engine) joblib then spawns a worker pool per
+    # predict_proba call, which (a) floods the console with the
+    # "sklearn.utils.parallel.delayed should be used with Parallel" UserWarning and
+    # (b) adds thread-startup overhead that dwarfs the actual prediction work.
+    # Forcing serial prediction removes both problems.
+    if hasattr(model, "n_jobs"):
+        model.n_jobs = 1
     logger.info("Model loaded successfully.")
     return model
 
