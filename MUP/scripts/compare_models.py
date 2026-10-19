@@ -65,20 +65,7 @@ except ImportError:
 # Paths
 # ---------------------------------------------------------------------------
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-COMP1_DATA = os.path.abspath(os.path.join(BASE, "..", "component1", "output", "ml_ready_dataset.csv"))
-HPMFD_DATA = os.path.abspath(os.path.join(BASE, "..", "..", "..", "HPMFD", "output", "ml_ready_dataset.csv"))
-LOCAL_DATA = os.path.join(BASE, "data", "ml_ready_dataset.csv")
-
-
-def resolve_input_csv() -> str:
-    """Prefer Component 1's generated ML dataset, then fall back to legacy locs."""
-    for path in (COMP1_DATA, HPMFD_DATA, LOCAL_DATA):
-        if os.path.exists(path):
-            return path
-    return LOCAL_DATA
-
-
-DATA = resolve_input_csv()
+DATA = os.path.join(BASE, "data", "ml_ready_dataset.csv")
 MODELS_DIR = os.path.join(BASE, "models")
 LOGS_DIR = os.path.join(BASE, "logs")
 os.makedirs(MODELS_DIR, exist_ok=True)
@@ -153,51 +140,59 @@ def build_models() -> dict:
 # ---------------------------------------------------------------------------
 def lopo_cv(model, X: pd.DataFrame, y: pd.Series, projects: pd.Series) -> dict:
     """Run Leave-One-Project-Out cross-validation for a single classifier.
-    Falls back to StratifiedKFold CV if dataset contains fewer than 2 projects.
+
+    For each unique project ID, the model is trained on all other projects
+    and evaluated on the held-out project. Per-fold metrics and SHAP values
+    are collected (SHAP only for tree-based models that support TreeExplainer).
+
+    Parameters
+    ----------
+    model : sklearn estimator
+        An unfitted classifier that implements fit / predict / predict_proba.
+    X : pd.DataFrame
+        Full feature matrix (all projects).
+    y : pd.Series
+        Full label series aligned to X.
+    projects : pd.Series
+        Project ID series aligned to X and y.
+
+    Returns
+    -------
+    dict
+        Keys: mean_f1, f1_var, mean_prec, mean_rec, mean_auc, fold_details,
+        shap_fold_data (list of per-fold SHAP dicts, empty for non-tree models).
     """
     unique = sorted(projects.unique())
     f1s, precs, recs, aucs = [], [], [], []
     fold_details = []
     shap_fold_data = []
 
-    if len(unique) < 2:
-        from sklearn.model_selection import StratifiedKFold
-        skf = StratifiedKFold(n_splits=min(5, len(y)), shuffle=True, random_state=RANDOM_SEED)
-        splits = [
-            (f"Fold_{idx}", train_idx, test_idx)
-            for idx, (train_idx, test_idx) in enumerate(skf.split(X, y), 1)
-        ]
-    else:
-        splits = []
-        for proj in unique:
-            mask_test = projects == proj
-            mask_train = ~mask_test
-            splits.append((proj, np.where(mask_train)[0], np.where(mask_test)[0]))
-
-    for name, train_idx, test_idx in splits:
-        X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
-        y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
+    for proj in unique:
+        mask_test = projects == proj
+        mask_train = ~mask_test
+        y_test = y[mask_test]
 
         if len(y_test.unique()) < 2:
-            logger.info(f"    [{name}] Skipped -- only one class in test fold.")
+            logger.info(f"    [{proj}] Skipped -- only one class in test fold.")
             continue
 
         scaler = StandardScaler()
-        X_train_s = scaler.fit_transform(X_train)
-        X_test_s = scaler.transform(X_test)
+        X_train_s = scaler.fit_transform(X[mask_train])
+        X_test_s = scaler.transform(X[mask_test])
 
         try:
-            model.fit(X_train_s, y_train)
+            model.fit(X_train_s, y[mask_train])
             y_pred = model.predict(X_test_s)
             y_prob = model.predict_proba(X_test_s)[:, 1]
         except Exception as exc:
-            logger.warning(f"    [{name}] Error: {exc}")
+            logger.warning(f"    [{proj}] Error: {exc}")
             continue
 
         y_test_bin = (y_test == "FAILURE").astype(int)
 
         try:
             auc = roc_auc_score(y_test_bin, y_prob)
+            # Flip if inverted (AUC < 0.5 means probabilities are reversed)
             if auc < 0.5:
                 auc = roc_auc_score(y_test_bin, 1.0 - y_prob)
         except Exception:
@@ -212,10 +207,12 @@ def lopo_cv(model, X: pd.DataFrame, y: pd.Series, projects: pd.Series) -> dict:
         recs.append(rec)
         aucs.append(auc)
         fold_details.append({
-            "project": name, "f1": round(f1, 4), "precision": round(prec, 4),
+            "project": proj, "f1": round(f1, 4), "precision": round(prec, 4),
             "recall": round(rec, 4), "auc": round(auc, 4),
         })
 
+        # SHAP -- only for tree-based models
+        shap_top = []
         if hasattr(model, "feature_importances_"):
             try:
                 explainer = shap.TreeExplainer(model)
@@ -227,9 +224,9 @@ def lopo_cv(model, X: pd.DataFrame, y: pd.Series, projects: pd.Series) -> dict:
                 mean_abs = np.abs(sv).mean(axis=0)
                 shap_imp = dict(zip(FEATURES, mean_abs.tolist()))
                 shap_top = sorted(shap_imp, key=shap_imp.get, reverse=True)[:TOP_N_SHAP]
-                shap_fold_data.append({"project": name, "importance": shap_imp, "top": shap_top})
+                shap_fold_data.append({"project": proj, "importance": shap_imp, "top": shap_top})
             except Exception as exc:
-                logger.warning(f"    [{name}] SHAP failed: {exc}")
+                logger.warning(f"    [{proj}] SHAP failed: {exc}")
 
     n = len(f1s)
     return {
@@ -302,28 +299,27 @@ def save_shap_consistency(shap_fold_data: list) -> dict:
             counter[feat] += 1
 
     sorted_counts = dict(sorted(counter.items(), key=lambda x: x[1], reverse=True))
-    n_folds = len(shap_fold_data)
-    threshold = min(CONSISTENCY_MIN, n_folds) if n_folds > 0 else CONSISTENCY_MIN
-    universal = [f for f, cnt in sorted_counts.items() if cnt >= threshold]
+    universal = [f for f, cnt in sorted_counts.items() if cnt >= CONSISTENCY_MIN]
 
     logger.info("")
     logger.info("SHAP Cross-Fold Consistency")
     logger.info("-" * 50)
+    n_folds = len(shap_fold_data)
     for feat, cnt in sorted_counts.items():
-        tag = "  <-- UNIVERSAL" if cnt >= threshold else ""
+        tag = "  <-- UNIVERSAL" if cnt >= CONSISTENCY_MIN else ""
         logger.info(f"  {feat:<30} {cnt}/{n_folds} folds{tag}")
-    logger.info(f"  Universal features (>= {threshold}/{n_folds}): {universal}")
+    logger.info(f"  Universal features (>= {CONSISTENCY_MIN}/{n_folds}): {universal}")
 
     # Consistency bar chart
     fnames = list(sorted_counts.keys())
     fcounts = list(sorted_counts.values())
-    colors = ["#2563eb" if c >= threshold else "#94a3b8" for c in fcounts]
+    colors = ["#2563eb" if c >= CONSISTENCY_MIN else "#94a3b8" for c in fcounts]
 
     fig, ax = plt.subplots(figsize=(9, 5))
     ax.barh(fnames[::-1], fcounts[::-1], color=colors[::-1])
     ax.axvline(
-        threshold, color="red", linestyle="--", linewidth=1.5,
-        label=f"Consistency threshold ({threshold} folds)",
+        CONSISTENCY_MIN, color="red", linestyle="--", linewidth=1.5,
+        label=f"Consistency threshold ({CONSISTENCY_MIN} folds)",
     )
     ax.set_xlabel("Number of folds in top-N", fontsize=11)
     ax.set_title("SHAP Feature Consistency Across LOPO Folds", fontsize=12, fontweight="bold")
@@ -404,7 +400,6 @@ def main() -> None:
     projects = df["project_id"]
     logger.info(f"  Dataset : {len(df)} rows | {projects.nunique()} projects")
     logger.info(f"  Labels  : {dict(y.value_counts())}")
-    logger.info(f"  Source  : {DATA}")
     logger.info("")
 
     models_def = build_models()

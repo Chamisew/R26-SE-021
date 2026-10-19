@@ -1,8 +1,8 @@
 {
   "best_model": "Random Forest",
-  "mean_f1": 0.8571,
-  "f1_variance": 0.081636,
-  "mean_auc": 0.9057,
+  "mean_f1": 0.9775,
+  "f1_variance": 2.6e-05,
+  "mean_auc": 0.9877,
   "alarm_threshold": 0.6,
   "features": [
     "memory_change_10min",
@@ -21,14 +21,17 @@
     "incident_phase_2"
   ],
   "shap_consistency": {
-    "gc_count": 5,
-    "heap_mb_used": 5,
-    "heap_max": 5,
-    "ram_max": 4,
-    "gc_spike_count": 3,
-    "ram_std": 2,
-    "heap_rate": 1
+    "ram_std_trend": 9,
+    "incident_phase_1": 9,
+    "incident_phase_2": 9,
+    "gc_spike_count": 8,
+    "gc_count": 6,
+    "heap_mb_used": 1,
+    "ram_percent": 1,
+    "ram_max": 1,
+    "heap_max": 1
   },
-  "rows_trained": 24585,
-  "projects": 5
+  "label_positive": "FAILURE",
+  "rows_trained": 8500,
+  "projects": 10
 }

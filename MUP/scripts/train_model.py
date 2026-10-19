@@ -1,6 +1,7 @@
 """
 Component 3 -- Memory Leak Predictor  (Train Only)
 
+
 Trains a Random Forest classifier on ml_ready_dataset.csv using Leave-One-Project-Out
 (LOPO) cross-validation across all microservice projects.
 
@@ -52,19 +53,7 @@ from sklearn.metrics import f1_score, precision_score, recall_score, roc_auc_sco
 # Paths
 # ---------------------------------------------------------------------------
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-COMP1_DATA = os.path.abspath(os.path.join(BASE, "..", "component1", "output", "ml_ready_dataset.csv"))
-HPMFD_DATA = os.path.abspath(os.path.join(BASE, "..", "..", "..", "HPMFD", "output", "ml_ready_dataset.csv"))
-LOCAL_DATA = os.path.join(BASE, "data", "ml_ready_dataset.csv")
-
-
-def resolve_input_csv() -> str:
-    for path in (COMP1_DATA, HPMFD_DATA, LOCAL_DATA):
-        if os.path.exists(path):
-            return path
-    return LOCAL_DATA
-
-
-DATA = resolve_input_csv()
+DATA = os.path.join(BASE, "data", "ml_ready_dataset.csv")
 MODELS_DIR = os.path.join(BASE, "models")
 LOGS_DIR = os.path.join(BASE, "logs")
 os.makedirs(MODELS_DIR, exist_ok=True)
@@ -136,7 +125,6 @@ def load_data(path: str) -> pd.DataFrame:
     after = len(df)
     logger.info(f"  Rows loaded  : {before}  |  after dropna: {after}")
     logger.info(f"  Label dist   : {dict(df[TARGET].value_counts())}")
-    logger.info(f"  Source       : {path}")
     return df
 
 

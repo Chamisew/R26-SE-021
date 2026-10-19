@@ -1,0 +1,10 @@
+project,f1,precision,recall,auc,shap_top3
+project_1,0.9777,1.0,0.9564,0.9742,"ram_std_trend, incident_phase_1, incident_phase_2"
+project_10,0.9739,1.0,0.9492,0.9837,"ram_std_trend, incident_phase_1, incident_phase_2"
+project_2,0.9703,1.0,0.9423,0.9957,"ram_std_trend, incident_phase_1, incident_phase_2"
+project_3,0.9739,1.0,0.9491,0.9961,"ram_std_trend, incident_phase_1, incident_phase_2"
+project_4,0.9739,1.0,0.9492,0.9848,"ram_std_trend, incident_phase_1, incident_phase_2"
+project_6,0.9779,1.0,0.9568,0.988,"ram_std_trend, incident_phase_1, incident_phase_2"
+project_7,0.9846,1.0,0.9697,0.9744,"ram_std_trend, incident_phase_1, incident_phase_2"
+project_8,0.978,1.0,0.9569,0.9924,"ram_std_trend, incident_phase_1, incident_phase_2"
+project_9,0.987,1.0,0.9744,0.9998,"ram_std_trend, incident_phase_1, incident_phase_2"
