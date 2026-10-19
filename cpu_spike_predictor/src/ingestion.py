@@ -50,7 +50,6 @@ COMP3_REQUIRED_COLUMNS = {
     "timestamp", "service_name", "project_id", "memory_prob", "alert", "pred_label"
 }
 
-
 def add_lead_time_labels(df: pd.DataFrame, lead_time_minutes: int = 5) -> pd.DataFrame:
     """
     Creates a proactive target label 'imminent_failure' for Component 2 data.

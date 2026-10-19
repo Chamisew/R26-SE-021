@@ -1,0 +1,42 @@
+﻿# Python bytecode and test/tool caches
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+venv_old/
+
+# Generated live data (keep source datasets trackable)
+data/live_feed.csv
+data/memory_predictions.csv
+
+# Generated logs and plots; retain comparison evidence
+logs/*
+!logs/comparison_results.csv
+!logs/compare.log
+!logs/lopo_results.csv
+
+# Regenerable trained model binaries
+models/*.pkl
+models/*.joblib
+
+# Build artifacts and installed dependencies
+build/
+dist/
+node_modules/
+**/site-packages/
+**/dist-info/
+**/*.egg/
+*.so
+*.pyd
+*.dll
+*.a
+*.o
+*.lib

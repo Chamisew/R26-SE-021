@@ -34,9 +34,95 @@ from sklearn.model_selection import train_test_split
 warnings.filterwarnings("ignore")
 
 # =============================================================================
+# GROUND TRUTH — load failure events from data/failure_events.csv
+# =============================================================================
+def load_failure_events():
+    """Load failure events from data/failure_events.csv.
+    Returns DataFrame with columns: service_name, failure_type, start_time, end_time.
+    Returns empty DataFrame if file not found.
+    """
+    events_path = os.path.join(os.path.dirname(__file__), "data", "failure_events.csv")
+    if not os.path.exists(events_path):
+        return pd.DataFrame(columns=["service_name", "failure_type", "start_time", "end_time"])
+    try:
+        df = pd.read_csv(events_path)
+        df["start_time"] = pd.to_datetime(df["start_time"], errors="coerce")
+        df["end_time"] = pd.to_datetime(df["end_time"], errors="coerce")
+        return df
+    except Exception:
+        return pd.DataFrame(columns=["service_name", "failure_type", "start_time", "end_time"])
+
+
+def fill_ground_truth(df, failure_events):
+    """Fill ground_truth_label column based on failure events.
+    FAILURE between start and end, NORMAL otherwise, UNKNOWN only if no entry for that service.
+    """
+    df = df.copy()
+    if "ground_truth_label" not in df.columns:
+        df["ground_truth_label"] = "UNKNOWN"
+    else:
+        df["ground_truth_label"] = df["ground_truth_label"].fillna("UNKNOWN")
+
+    if failure_events is None or failure_events.empty:
+        return df
+
+    df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
+
+    for _, event in failure_events.iterrows():
+        svc = event["service_name"]
+        start = event["start_time"]
+        end = event["end_time"]
+        mask = (
+            (df["service_name"] == svc)
+            & (df["timestamp"] >= start)
+            & (df["timestamp"] <= end)
+        )
+        df.loc[mask, "ground_truth_label"] = "FAILURE"
+
+    # Fill NORMAL for services that have events but outside time windows
+    services_with_events = set(failure_events["service_name"].unique())
+    for svc in services_with_events:
+        svc_mask = df["service_name"] == svc
+        unknown_mask = svc_mask & (df["ground_truth_label"] == "UNKNOWN")
+        df.loc[unknown_mask, "ground_truth_label"] = "NORMAL"
+
+    return df
+
+
+def compute_label_3state(df, failure_events):
+    """Compute label_3state: NORMAL, PRE_FAILURE (5-10 min before failure start), FAILURE.
+    Driven by ground-truth failure events.
+    """
+    df = df.copy()
+    df["label_3state"] = "NORMAL"
+
+    if failure_events is None or failure_events.empty:
+        return df
+
+    df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
+
+    for _, event in failure_events.iterrows():
+        svc = event["service_name"]
+        start = event["start_time"]
+
+        svc_mask = df["service_name"] == svc
+        delta = (start - df["timestamp"]).dt.total_seconds()
+
+        # PRE_FAILURE: 5-10 minutes before failure start
+        mask_pre = svc_mask & (delta > 5 * 60) & (delta <= 10 * 60)
+        df.loc[mask_pre, "label_3state"] = "PRE_FAILURE"
+
+        # FAILURE: during the failure window
+        mask_fail = svc_mask & (delta <= 0) & (delta >= -(15 * 60))
+        df.loc[mask_fail, "label_3state"] = "FAILURE"
+
+    return df
+
+
+# =============================================================================
 # SHARED PIPELINE STATE (thread-safe)
 # =============================================================================
-pipeline_state_lock = threading.Lock()
+pipeline_state_lock = threading.RLock()
 pipeline_state = {
     "raw_df": None,           # latest raw collected DataFrame
     "windows_df": None,       # latest windows DataFrame
@@ -63,6 +149,10 @@ CONFIG = {
     "window_size"            : 12,
     "window_minutes"         : 5,
     "tfidf_threshold"        : 0.12,   # lowered: catches more semantic failures
+    "semantic_margin"        : 0.05,   # sim_failure - sim_normal > margin
+    "semantic_backend"       : "tfidf",# "tfidf" or "embedding"
+    "embedding_model"        : "all-MiniLM-L6-v2",
+    "embedding_threshold"    : 0.35,   # cosine sim threshold for sentence embeddings
     "metric_score_threshold" : 3,      # lowered: metric fusion upgrades sooner
     # Live collection settings
     "live_duration_minutes"  : 1,
@@ -72,8 +162,76 @@ CONFIG = {
 
 
 # =============================================================================
-# KEYWORD LISTS — memory and CPU failure signals
+# COMPILED WORD-BOUNDARY REGEX PATTERNS (LAYER 1 KEYWORDS)
 # =============================================================================
+# Compiled word-boundary regexes mapping to specific failure_type:
+# "oom", "memory_leak", "gc_overhead" (and "cpu_spike")
+LAYER1_PATTERNS = [
+    # --- GC Overhead Patterns (failure_type: gc_overhead) ---
+    (re.compile(r"\b(?:java\.lang\.)?OutOfMemoryError:\s*GC\s+overhead\s+limit\s+exceeded\b", re.IGNORECASE), "gc_overhead"),
+    (re.compile(r"\b(?:gc|garbage\s+collection)\s+overhead\s+limit\s+exceeded\b", re.IGNORECASE), "gc_overhead"),
+    (re.compile(r"\b(?:gc|garbage\s+collection)\s+overhead\s+exceeded\b", re.IGNORECASE), "gc_overhead"),
+
+    # --- Real Memory-Error Patterns per Language / Platform (failure_type: oom) ---
+    # Java: OutOfMemoryError: Java heap space
+    (re.compile(r"\b(?:java\.lang\.)?OutOfMemoryError:\s*Java\s+heap\s+space\b", re.IGNORECASE), "oom"),
+    (re.compile(r"\b(?:java\.lang\.)?OutOfMemoryError\b", re.IGNORECASE), "oom"),
+    (re.compile(r"\bjava\s+heap\s+space\b", re.IGNORECASE), "oom"),
+
+    # Node: FATAL ERROR: Reached heap limit
+    (re.compile(r"\bFATAL\s+ERROR:\s*Reached\s+heap\s+limit\b", re.IGNORECASE), "oom"),
+    (re.compile(r"\bFATAL\s+ERROR:\s*(?:CALL_AND_RETRY_LAST\s+)?(?:Allocation\s+failed\s*-\s*)?JavaScript\s+heap\s+out\s+of\s+memory\b", re.IGNORECASE), "oom"),
+    (re.compile(r"\bReached\s+heap\s+limit\b", re.IGNORECASE), "oom"),
+    (re.compile(r"\bJavaScript\s+heap\s+out\s+of\s+memory\b", re.IGNORECASE), "oom"),
+
+    # Python: MemoryError
+    (re.compile(r"\bMemoryError\b", re.IGNORECASE), "oom"),
+
+    # Go: runtime: out of memory
+    (re.compile(r"\bruntime:\s*out\s+of\s+memory\b", re.IGNORECASE), "oom"),
+    (re.compile(r"\bfatal\s+error:\s*runtime:\s*out\s+of\s+memory\b", re.IGNORECASE), "oom"),
+
+    # PHP: Allowed memory size exhausted
+    (re.compile(r"\bAllowed\s+memory\s+size(?:\s+of\s+\d+\s+bytes)?\s+exhausted\b", re.IGNORECASE), "oom"),
+    (re.compile(r"\bAllowed\s+memory\s+size.*?exhausted\b", re.IGNORECASE), "oom"),
+
+    # Ruby: NoMemoryError
+    (re.compile(r"\bNoMemoryError\b", re.IGNORECASE), "oom"),
+
+    # Containers: OOMKilled, exit code 137, Killed process
+    (re.compile(r"\bOOMKilled\b", re.IGNORECASE), "oom"),
+    (re.compile(r"\bexit\s+code\s+137\b", re.IGNORECASE), "oom"),
+    (re.compile(r"\bKilled\s+process\b", re.IGNORECASE), "oom"),
+
+    # Generic OOM patterns
+    (re.compile(r"\bout\s+of\s+memory\b", re.IGNORECASE), "oom"),
+    (re.compile(r"\bOOM\b", re.IGNORECASE), "oom"),
+    (re.compile(r"\bheap\s+out\s+of\s+memory\b", re.IGNORECASE), "oom"),
+    (re.compile(r"\bheap\s+exhaustion\b", re.IGNORECASE), "oom"),
+    (re.compile(r"\bheap\s+exhausted\b", re.IGNORECASE), "oom"),
+    (re.compile(r"\ballocation\s+failed\b", re.IGNORECASE), "oom"),
+    (re.compile(r"\ballocation\s+failure\b", re.IGNORECASE), "oom"),
+    (re.compile(r"\bcannot\s+allocate\b", re.IGNORECASE), "oom"),
+
+    # --- Memory Leak / Pressure Patterns (failure_type: memory_leak) ---
+    (re.compile(r"\bmemory\s+leak\b", re.IGNORECASE), "memory_leak"),
+    (re.compile(r"\bmemory\s+pressure\b", re.IGNORECASE), "memory_leak"),
+    (re.compile(r"\bheap\s+growing\b", re.IGNORECASE), "memory_leak"),
+    (re.compile(r"\bheap\s+used\s+critical\b", re.IGNORECASE), "memory_leak"),
+    (re.compile(r"\bmemory\s+threshold(?:\s+exceeded)?\b", re.IGNORECASE), "memory_leak"),
+    (re.compile(r"\bmemory\s+critical\b", re.IGNORECASE), "memory_leak"),
+    (re.compile(r"\bmemory\s+limit(?:\s+exceeded)?\b", re.IGNORECASE), "memory_leak"),
+    (re.compile(r"\bheap\s+pressure\b", re.IGNORECASE), "memory_leak"),
+
+    # --- CPU Spike Patterns (failure_type: cpu_spike) ---
+    (re.compile(r"\bcpu\s+spike\b", re.IGNORECASE), "cpu_spike"),
+    (re.compile(r"\bhigh\s+computation\b", re.IGNORECASE), "cpu_spike"),
+    (re.compile(r"\bcpu\s+usage\s+critical\b", re.IGNORECASE), "cpu_spike"),
+    (re.compile(r"\bthread\s+pool\s+exhausted\b", re.IGNORECASE), "cpu_spike"),
+    (re.compile(r"\bcomputation\s+started\b", re.IGNORECASE), "cpu_spike"),
+]
+
+# Legacy keyword lists maintained for backwards compatibility
 MEMORY_KEYWORDS = [
     "MEMORY LEAK", "MEMORY PRESSURE", "OUT OF MEMORY", "OOM",
     "HEAP GROWING", "HEAP EXHAUSTION", "HEAP SPACE",
@@ -91,7 +249,7 @@ CPU_KEYWORDS = [
 ALL_KEYWORDS = MEMORY_KEYWORDS + CPU_KEYWORDS
 
 # =============================================================================
-# TF-IDF FAILURE REFERENCE CORPUS
+# REFERENCE CORPORA FOR SEMANTIC SIMILARITY
 # =============================================================================
 FAILURE_REFERENCE_CORPUS = [
     "memory leak heap allocation increasing",
@@ -104,6 +262,33 @@ FAILURE_REFERENCE_CORPUS = [
     "memory threshold exceeded heap growing fast",
     "fatal heap exhaustion process memory critical",
     "java heap space outofmemoryerror gc overhead",
+]
+
+FAILURE_REFERENCE_TYPES = [
+    "memory_leak",
+    "oom",
+    "memory_leak",
+    "memory_leak",
+    "gc_overhead",
+    "oom",
+    "cpu_spike",
+    "memory_leak",
+    "oom",
+    "oom",
+]
+
+# Normal reference corpus: routine log templates (health checks, request completed, routine GC stable lines)
+NORMAL_REFERENCE_CORPUS = [
+    "health check passed service status ok",
+    "service health probe succeeded 200 ok",
+    "http request completed successfully status 200",
+    "request completed successfully in 12ms",
+    "routine garbage collection overhead limit stable",
+    "routine gc stable gc pause normal memory healthy",
+    "garbage collection completed heap memory reclaimed stable",
+    "service heartbeat received system healthy running",
+    "client connection established request handled",
+    "routine periodic maintenance completed normal status ok",
 ]
 
 
@@ -130,6 +315,18 @@ def _has_gc_keyword(text: str) -> bool:
 
 
 # ---- Live dashboard printer -------------------------------------------------
+def _safe_print(text: str = "") -> None:
+    """Windows console safe print that never crashes on Unicode encoding issues."""
+    try:
+        print(text)
+    except (UnicodeEncodeError, Exception):
+        try:
+            safe_text = text.encode("ascii", errors="replace").decode("ascii")
+            print(safe_text)
+        except Exception:
+            pass
+
+
 def _print_dashboard(
     elapsed_sec: int,
     total_sec: int,
@@ -142,65 +339,81 @@ def _print_dashboard(
     """
     Print a live ASCII dashboard showing per-service stats and online/offline status.
     """
-    elapsed_td = str(timedelta(seconds=elapsed_sec))
-    total_td = str(timedelta(seconds=total_sec)) if total_sec > 0 else "infinite"
+    try:
+        elapsed_td = str(timedelta(seconds=elapsed_sec))
+        total_td = str(timedelta(seconds=total_sec)) if total_sec > 0 else "infinite"
 
-    with results_lock:
-        snapshot = list(results_list)
+        with results_lock:
+            snapshot = list(results_list)
 
-    total_rows = len(snapshot)
+        total_rows = len(snapshot)
 
-    # Aggregate latest row per service
-    latest = {}
-    for row in snapshot:
-        latest[row["service_name"]] = row
+        # Aggregate latest row per service
+        latest = {}
+        for row in snapshot:
+            latest[row["service_name"]] = row
 
-    warnings_count = warning_counter[0]
-    errors_count = error_counter[0]
+        warnings_count = warning_counter[0]
+        errors_count = error_counter[0]
 
-    border_width = 65
-    header = f"  LIVE COLLECTION — {elapsed_td} elapsed / {total_td} total  "
-    col_header = f"  {'Service':<24} {'Status':<8} {'RAM%':>6}  {'CPU%':>6}  {'Heap(MB)':>9}"
+        border_width = 65
+        header = f"  LIVE COLLECTION -- {elapsed_td} elapsed / {total_td} total  "
+        col_header = f"  {'Service':<24} {'Status':<8} {'RAM%':>6}  {'CPU%':>6}  {'Heap(MB)':>9}"
 
-    print()
-    print("╔" + "═" * border_width + "╗")
-    print("║" + header.center(border_width) + "║")
-    print("╠" + "═" * border_width + "╣")
-    print("║" + col_header.ljust(border_width) + "║")
+        _safe_print()
+        _safe_print("+" + "=" * border_width + "+")
+        _safe_print("|" + header.center(border_width) + "|")
+        _safe_print("+" + "=" * border_width + "+")
+        _safe_print("|" + col_header.ljust(border_width) + "|")
 
-    # Show all configured services and their status
-    for sname in sorted(service_status.keys()):
-        is_online = service_status[sname]
-        status_str = "UP" if is_online else "DOWN"
-        
-        row = latest.get(sname)
-        if row and is_online:
-            ram = row["ram_percent"]
-            cpu = row["cpu_percent"]
-            heap = row["heap_mb_used"]
-            warn_flag = " ⚠️ " if ram > 70 else "    "
-            line = (
-                f"  {sname:<24} {status_str:<8} {ram:>5.1f}%  {cpu:>5.1f}%  {heap:>7.1f}MB"
-                + warn_flag
-            )
-        else:
-            line = f"  {sname:<24} {status_str:<8} {'--':>6}  {'--':>6}  {'--':>9}"
-        print("║" + line.ljust(border_width) + "║")
+        # Show all configured services and their status
+        for sname in sorted(service_status.keys()):
+            is_online = service_status[sname]
+            status_str = "UP" if is_online else "DOWN"
+            
+            row = latest.get(sname)
+            if row and is_online:
+                ram = row["ram_percent"]
+                cpu = row["cpu_percent"]
+                heap = row["heap_mb_used"]
+                warn_flag = " [!] " if ram > 70 else "     "
+                line = (
+                    f"  {sname:<24} {status_str:<8} {ram:>5.1f}%  {cpu:>5.1f}%  {heap:>7.1f}MB"
+                    + warn_flag
+                )
+            else:
+                line = f"  {sname:<24} {status_str:<8} {'--':>6}  {'--':>6}  {'--':>9}"
+            _safe_print("|" + line.ljust(border_width) + "|")
 
-    print("╚" + "═" * border_width + "╝")
-    print(f"  Total rows: {total_rows} | Warnings: {warnings_count} | Errors: {errors_count}")
+        _safe_print("+" + "=" * border_width + "+")
+        _safe_print(f"  Total rows: {total_rows} | Warnings: {warnings_count} | Errors: {errors_count}")
+    except Exception:
+        pass
 
 
 def load_azure_services():
     """Loads service configurations.
     Priority:
-    1. Environment variables starting with 'AZURE_SERVICE_' (e.g. AZURE_SERVICE_NODE)
+    1. JSON file 'services_config.json' (dynamically configured via UI)
     2. Local '.env' file containing KEY=VALUE pairs
-    3. JSON file 'services_config.json' (fallback)
+    3. Environment variables starting with 'AZURE_SERVICE_'
+    Merges all sources so user-added services in services_config.json are always included.
     """
     services = {}
 
-    # 1. Try reading from a local .env file first to populate environment
+    # 1. Load from services_config.json (primary source for UI-managed services)
+    config_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "services_config.json")
+    if os.path.exists(config_file):
+        try:
+            with open(config_file, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+            for s in cfg.get("services", []):
+                if s.get("enabled", True) and s.get("base_url", "").startswith("http"):
+                    services[s["name"]] = s["base_url"].rstrip("/")
+        except Exception as e:
+            pass
+
+    # 2. Try reading from a local .env file
     env_file = ".env"
     if os.path.exists(env_file):
         try:
@@ -213,32 +426,14 @@ def load_azure_services():
         except Exception as e:
             pass
 
-    # 2. Check for environment variables (either system-wide or loaded from .env)
+    # 3. Check for environment variables (merge without discarding services_config.json)
     for env_name, env_val in os.environ.items():
         if env_name.startswith("AZURE_SERVICE_") and env_val.startswith("http"):
-            # e.g. AZURE_SERVICE_NODE -> "node-azure"
             service_name = env_name.replace("AZURE_SERVICE_", "").lower() + "-azure"
-            services[service_name] = env_val
+            if service_name not in services:
+                services[service_name] = env_val.rstrip("/")
 
-    if services:
-        return services
-
-    # 3. Fallback to services_config.json if no env vars exist
-    config_file = "services_config.json"
-    if os.path.exists(config_file):
-        try:
-            with open(config_file) as f:
-                cfg = json.load(f)
-            services = {
-                s["name"]: s["base_url"]
-                for s in cfg.get("services", [])
-                if s.get("enabled", True) and s.get("base_url", "").startswith("http")
-            }
-            return services
-        except Exception as e:
-            pass
-
-    return {}
+    return services
 
 
 def _detect_azure_stack(service_name: str, sidecar_lang: str) -> str:
@@ -253,6 +448,12 @@ def _detect_azure_stack(service_name: str, sidecar_lang: str) -> str:
         return ".NET/Core"
     if any(k in lang for k in ("go", "golang")):
         return "Go/net_http"
+    if any(k in lang for k in ("php",)):
+        return "PHP/FPM"
+    if any(k in lang for k in ("ruby", "rails", "puma")):
+        return "Ruby/Puma"
+    if any(k in lang for k in ("swift", "vapor")):
+        return "Swift/Vapor"
     
     # Fallback to name-based detection
     cname = (service_name or "").lower()
@@ -264,9 +465,15 @@ def _detect_azure_stack(service_name: str, sidecar_lang: str) -> str:
         return "Java/SpringBoot"
     if "dotnet" in cname or "aspnet" in cname:
         return ".NET/Core"
-    if "golang" in cname or "/go" in cname or "go_" in cname:
+    if "golang" in cname or "go-" in cname or "/go" in cname or "go_" in cname:
         return "Go/net_http"
-    return "Unknown"
+    if "php" in cname:
+        return "PHP/FPM"
+    if "ruby" in cname:
+        return "Ruby/Puma"
+    if "swift" in cname or "vapor" in cname:
+        return "Swift/Vapor"
+    return "Microservice"
 
 
 def _collect_azure_sidecar(
@@ -288,48 +495,82 @@ def _collect_azure_sidecar(
     stack = "Unknown"
 
     while duration_seconds <= 0 or (time.monotonic() - start_time) < duration_seconds:
+        if not service_status.get(service_name, True):
+            break
         tick_start = time.monotonic()
         
         try:
-            resp = requests.get(f"{base_url}/metrics", timeout=4.0)
+            resp = requests.get(f"{base_url}/metrics", timeout=(5.0, 15.0))
             if resp.status_code == 200:
                 data = resp.json()
                 
                 # Update service online status
                 service_status[service_name] = True
-                
-                cpu_percent = float(data.get("cpu_percent", 0.0))
-                ram_percent = float(data.get("memory_percent", 0.0))
-                heap_mb_used = float(data.get("memory_used_mb", 0.0))
-                
-                # Check if sidecar has gc_count, otherwise use 0
+
+                # Handle nested vs flat telemetry schemas (Azure Container Apps vs mock sidecars)
+                mem = data.get("memory") if isinstance(data.get("memory"), dict) else {}
+
+                cpu_raw = data.get("cpu_percent")
+                if cpu_raw is None:
+                    cpu_raw = data.get("cpu_usage_percent")
+                if cpu_raw is None:
+                    cpu_raw = mem.get("cpu_percent", 0.0)
+                cpu_percent = float(cpu_raw or 0.0)
+
+                ram_raw = data.get("memory_percent")
+                if ram_raw is None:
+                    ram_raw = data.get("memory_usage_percent")
+                if ram_raw is None:
+                    ram_raw = data.get("ram_percent")
+                if ram_raw is None:
+                    ram_raw = mem.get("container_memory_percent")
+                if ram_raw is None:
+                    ram_raw = mem.get("memory_percent", 0.0)
+                ram_percent = float(ram_raw or 0.0)
+
+                heap_raw = data.get("memory_used_mb")
+                if heap_raw is None:
+                    heap_raw = mem.get("heap_used_mb")
+                if heap_raw is None:
+                    heap_raw = mem.get("container_memory_usage_mb", 0.0)
+                heap_mb_used = float(heap_raw or 0.0)
+
+                heap_max_raw = data.get("heap_max")
+                if heap_max_raw is None:
+                    heap_max_raw = mem.get("heap_max_mb")
+                if heap_max_raw is None or float(heap_max_raw or 0.0) <= 0.0:
+                    heap_max_raw = mem.get("container_memory_limit_mb", 512.0)
+                heap_max_val = float(heap_max_raw or 512.0)
+
+                # Check if sidecar has gc_count (root level or nested under memory)
                 gc_count = data.get("gc_count")
+                if gc_count is None:
+                    gc_count = mem.get("gc_count")
                 
-                # Mapped or defaulted log message
-                log_message = str(data.get("log_message", "")).strip()
-                if not log_message:
-                    # Some sidecars publish only metrics; synthesize a stable message
-                    # so Stage 1.5 does not drop every row as invalid.
-                    if ram_percent >= 85 or heap_mb_used >= 2048:
-                        log_message = "memory pressure warning"
-                    elif cpu_percent >= 80:
-                        log_message = "cpu spike warning"
+                # Use actual sidecar log_message only; no synthesis
+                log_message = str(data.get("log_message", "") or "").strip()
+
+                # Determine log level from real message; INFO if empty
+                if log_message:
+                    log_level = str(data.get("log_level", ""))
+                    if not log_level:
+                        log_level = _detect_log_level(log_message)
                     else:
-                        log_message = "service heartbeat"
-                
-                # Determine log level
-                log_level = str(data.get("log_level", ""))
-                if not log_level:
-                    log_level = _detect_log_level(log_message)
+                        log_level = _detect_log_level(log_message)
                 else:
-                    log_level = _detect_log_level(log_message)
+                    log_level = "INFO"
                 
                 # Detect stack once
                 if stack == "Unknown":
-                    sidecar_lang = data.get("language", "")
+                    sidecar_lang = (
+                        data.get("language")
+                        or data.get("service")
+                        or mem.get("language")
+                        or ""
+                    )
                     stack = _detect_azure_stack(service_name, sidecar_lang)
                 
-                # GC detection from log message if present
+                # GC detection from real log message only (skip if empty)
                 if log_message and _has_gc_keyword(log_message):
                     gc_cumulative += 1
                 
@@ -338,18 +579,74 @@ def _collect_azure_sidecar(
                 else:
                     gc_val = int(gc_count)
                 
+                # Failure detection: metric-layer always runs; keyword layer only if log present
+                kw_label, kw_layer, kw_ft = _layer1_keyword(log_message) if log_message else (None, None, None)
+                is_fail = (
+                    ram_percent >= 80.0
+                    or kw_label == "FAILURE"
+                )
+                init_label = "FAILURE" if is_fail else "NORMAL"
+                init_ft = "none"
+                if is_fail:
+                    if kw_ft and kw_ft != "none":
+                        init_ft = kw_ft
+                    elif ram_percent >= 90.0:
+                        init_ft = "oom"
+                    elif ram_percent >= 70.0:
+                        init_ft = "memory_leak"
+                    else:
+                        init_ft = "memory_pressure"
+
+                # ---- Change 2: collect optional extra metrics (NaN if absent) ----
+                def _opt_float(sources, *keys):
+                    """Return first non-None float from a list of (dict, key) pairs."""
+                    for src, k in zip(sources, keys):
+                        v = src.get(k)
+                        if v is not None:
+                            try:
+                                return float(v)
+                            except (TypeError, ValueError):
+                                pass
+                    return float("nan")
+
+                rss_mb               = _opt_float([mem, data], "rss_memory_mb", "rss_mb")
+                post_gc_heap_mb      = _opt_float([mem, data], "post_gc_heap_mb", "post_gc_heap_mb")
+                gc_pause_ms_total    = _opt_float([mem, data], "gc_pause_total_ms", "gc_pause_ms_total")
+                container_mem_usage  = _opt_float([mem, data], "container_memory_usage_mb", "container_mem_usage_mb")
+                container_mem_limit  = _opt_float([mem, data], "container_memory_limit_mb", "container_mem_limit_mb")
+                oom_kill_count       = _opt_float([mem, data], "oom_kill_count", "oom_kill_count")
+                restart_count        = _opt_float([mem, data], "restart_count", "restart_count")
+                requests_per_sec     = _opt_float([mem, data], "requests_per_second", "requests_per_sec")
+                latency_p95_ms       = _opt_float([mem, data], "latency_p95_ms", "latency_p95_ms")
+                heap_max_mb_extra    = _opt_float([mem, data], "heap_max_mb", "heap_max_mb")
+                # -----------------------------------------------------------------
+
                 row = {
-                    "timestamp"          : datetime.now(),
-                    "service_name"       : service_name,
-                    "stack"              : stack,
-                    "log_level"          : log_level,
-                    "log_message"        : log_message,
-                    "ram_percent"        : round(ram_percent, 4),
-                    "cpu_percent"        : round(cpu_percent, 4),
-                    "heap_mb_used"       : round(heap_mb_used, 4),
-                    "gc_count"           : gc_val,
-                    "ground_truth_label" : "UNKNOWN",
-                    "failure_type"       : "none",
+                    "timestamp"              : datetime.now(),
+                    "service_name"           : service_name,
+                    "stack"                  : stack,
+                    "log_level"              : log_level,
+                    "log_message"            : log_message,
+                    "ram_percent"            : round(ram_percent, 4),
+                    "cpu_percent"            : round(cpu_percent, 4),
+                    "heap_mb_used"           : round(heap_mb_used, 4),
+                    "heap_max"               : round(heap_max_val, 4),
+                    "gc_count"               : gc_val,
+                    # Extra optional metrics (NaN if absent)
+                    "rss_mb"                 : rss_mb,
+                    "heap_max_mb"            : heap_max_mb_extra,
+                    "post_gc_heap_mb"        : post_gc_heap_mb,
+                    "gc_pause_ms_total"      : gc_pause_ms_total,
+                    "container_mem_usage_mb" : container_mem_usage,
+                    "container_mem_limit_mb" : container_mem_limit,
+                    "oom_kill_count"         : oom_kill_count,
+                    "restart_count"          : restart_count,
+                    "requests_per_sec"       : requests_per_sec,
+                    "latency_p95_ms"         : latency_p95_ms,
+                    "ground_truth_label"     : "UNKNOWN",
+                    "hybrid_label"           : init_label,
+                    "failure_type"           : init_ft,
+                    "detection_layer"        : "keyword" if is_fail else "none",
                 }
                 
                 with results_lock:
@@ -394,34 +691,20 @@ def stage1_collect_azure_sidecar(duration_minutes: int = 10) -> pd.DataFrame:
 
     # Discover microservices
     all_services = load_azure_services()
-    if not all_services:
-        print("\n  [WARN] No Azure services configured. Please set environment variables or services_config.json.")
-        return pd.DataFrame(columns=[
-            "timestamp", "service_name", "stack", "log_level", "log_message",
-            "ram_percent", "cpu_percent", "heap_mb_used", "gc_count",
-            "ground_truth_label", "failure_type",
-        ])
+    with pipeline_state_lock:
+        pipeline_state["configured_services"] = list(all_services.keys())
 
     print(f"\n  Checking configuration for {len(all_services)} Azure service(s):")
-    discovered_services = {}
+    discovered_services = dict(all_services)
     for name, base_url in all_services.items():
         try:
-            resp = requests.get(f"{base_url}/ping", timeout=4.0)
+            resp = requests.get(f"{base_url}/ping", timeout=3.0)
             if resp.status_code == 200:
-                discovered_services[name] = base_url
                 print(f"    • {name:<35} UP -> {base_url}")
             else:
-                print(f"    • {name:<35} returned status {resp.status_code} (ignored)")
+                print(f"    • {name:<35} returned status {resp.status_code} (will retry in background)")
         except Exception as exc:
-            print(f"    • {name:<35} unreachable: {exc} (ignored)")
-
-    if not discovered_services:
-        print("\n  [WARN] No active Azure services found (all ping calls failed).")
-        return pd.DataFrame(columns=[
-            "timestamp", "service_name", "stack", "log_level", "log_message",
-            "ram_percent", "cpu_percent", "heap_mb_used", "gc_count",
-            "ground_truth_label", "failure_type",
-        ])
+            print(f"    • {name:<35} initial check: {exc} (will retry in background)")
 
     # Shared state
     results_list = []
@@ -429,9 +712,9 @@ def stage1_collect_azure_sidecar(duration_minutes: int = 10) -> pd.DataFrame:
     error_counter = [0]
     warning_counter = [0]
     service_status = {name: True for name in discovered_services}
+    active_threads = {}
 
     # Spawn collector threads
-    threads = []
     for name, base_url in discovered_services.items():
         t = threading.Thread(
             target=_collect_azure_sidecar,
@@ -450,15 +733,16 @@ def stage1_collect_azure_sidecar(duration_minutes: int = 10) -> pd.DataFrame:
             name=f"collector-{name}",
         )
         t.start()
-        threads.append(t)
+        active_threads[name] = t
 
-    print(f"\n  Started {len(threads)} Azure sidecar collector thread(s). Collecting …\n")
+    print(f"\n  Started {len(active_threads)} Azure sidecar collector thread(s). Collecting …\n")
 
     # Dashboard and pipeline loop
     collection_start = time.monotonic()
     last_print_time = collection_start
     next_process_time = collection_start + PROCESS_INTERVAL_SEC
     last_saved_raw_rows = 0
+    last_processed_row_count = 0
 
     with pipeline_state_lock:
         pipeline_state["status"] = "collecting"
@@ -474,6 +758,42 @@ def stage1_collect_azure_sidecar(duration_minutes: int = 10) -> pd.DataFrame:
                 break
 
             if (now - last_print_time) >= INTERVAL_SEC:
+                # Dynamic discovery: reload services from services_config.json & env without restarting
+                current_services = load_azure_services()
+                with pipeline_state_lock:
+                    pipeline_state["configured_services"] = list(current_services.keys())
+
+                for name, base_url in current_services.items():
+                    t = active_threads.get(name)
+                    if name not in discovered_services or t is None or not t.is_alive():
+                        discovered_services[name] = base_url
+                        service_status[name] = True
+                        new_t = threading.Thread(
+                            target=_collect_azure_sidecar,
+                            args=(
+                                name,
+                                base_url,
+                                DURATION_SEC,
+                                INTERVAL_SEC,
+                                results_list,
+                                results_lock,
+                                error_counter,
+                                warning_counter,
+                                service_status,
+                            ),
+                            daemon=True,
+                            name=f"collector-{name}",
+                        )
+                        new_t.start()
+                        active_threads[name] = new_t
+                        print(f"  [DYNAMIC DISCOVERY] Started collector thread for Azure service '{name}' ({base_url})")
+
+                for name in list(discovered_services.keys()):
+                    if name not in current_services:
+                        service_status[name] = False
+                        discovered_services.pop(name, None)
+                        active_threads.pop(name, None)
+                        print(f"  [DYNAMIC DISCOVERY] Stopped collector thread for removed service '{name}'")
                 _print_dashboard(
                     int(elapsed),
                     DURATION_SEC,
@@ -485,13 +805,28 @@ def stage1_collect_azure_sidecar(duration_minutes: int = 10) -> pd.DataFrame:
                 )
                 with results_lock:
                     n_rows = len(results_list)
+                    snapshot_copy = list(results_list)
+                
+                # Push snapshot immediately to pipeline_state so app.py gets instant live updates
+                if snapshot_copy:
+                    snap_df = pd.DataFrame(snapshot_copy)
+                    with pipeline_state_lock:
+                        pipeline_state["raw_df"] = snap_df
+                        pipeline_state["rows_collected"] = len(snapshot_copy)
+                        pipeline_state["active_services"] = sorted(
+                            list({r.get("service_name") for r in snapshot_copy if r.get("service_name")})
+                        )
+                        pipeline_state["last_updated"] = datetime.now()
+                        if pipeline_state.get("status") in ("stopped", "ready"):
+                            pipeline_state["status"] = "collecting"
+
                 ram_vals = [
                     r["ram_percent"]
-                    for r in results_list
+                    for r in snapshot_copy
                     if r["ram_percent"] > 0
                 ]
                 ram_avg = sum(ram_vals) / len(ram_vals) if ram_vals else 0.0
-                active_c = len(set(r["service_name"] for r in results_list))
+                active_c = len(set(r["service_name"] for r in snapshot_copy))
                 print(
                     f"  [{int(elapsed)}s] "
                     f"Azure Services: {active_c} | "
@@ -531,46 +866,64 @@ def stage1_collect_azure_sidecar(duration_minutes: int = 10) -> pd.DataFrame:
 
                         processed_df = stage1_5_preprocess(raw_snapshot_df)
                         if not processed_df.empty:
+                            # Fill ground truth from failure events
+                            failure_events = load_failure_events()
+                            processed_df = fill_ground_truth(processed_df, failure_events)
+                            # Update per-service baselines from healthy rows
+                            _update_service_baselines(processed_df)
+                            # Run pipeline stages
                             processed_df = stage2_drain3_parsing(processed_df, CONFIG)
                             processed_df = stage3_hybrid_classifier(processed_df, CONFIG)
                             windows_df_partial = stage4_sliding_window(processed_df, CONFIG)
+                            if windows_df_partial is not None and not windows_df_partial.empty:
+                                failure_events = load_failure_events()
+                                if "label_3state" not in windows_df_partial.columns:
+                                    windows_df_partial = compute_label_3state(windows_df_partial, failure_events)
+                                windows_df_partial = continuous_save(windows_df_partial, CONFIG)
                         else:
                             windows_df_partial = pd.DataFrame()
 
+                        failure_count = 0
+                        normal_count = 0
                         if windows_df_partial is not None and not windows_df_partial.empty:
-                            windows_df_partial = continuous_save(windows_df_partial, CONFIG)
+                            if "ground_truth_label" in windows_df_partial.columns:
+                                failure_count = int(
+                                    (windows_df_partial["ground_truth_label"] == "FAILURE").sum()
+                                )
+                                normal_count = int(
+                                    (windows_df_partial["ground_truth_label"] == "NORMAL").sum()
+                                )
 
-                            failure_count = int(
-                                (windows_df_partial["ground_truth_label"] == "FAILURE").sum()
-                            )
-                            normal_count = int(
-                                (windows_df_partial["ground_truth_label"] == "NORMAL").sum()
-                            )
-                            with pipeline_state_lock:
+                        with pipeline_state_lock:
+                            if not processed_df.empty:
                                 pipeline_state["raw_df"] = processed_df.copy()
-                                pipeline_state["windows_df"] = windows_df_partial.copy()
-                                pipeline_state["rows_collected"] = len(raw_snapshot_df)
-                                pipeline_state["windows_generated"] = len(windows_df_partial)
                                 pipeline_state["active_services"] = sorted(
                                     processed_df["service_name"].astype(str).unique().tolist()
                                 )
-                                pipeline_state["last_updated"] = datetime.now()
+                            pipeline_state["rows_collected"] = len(raw_snapshot_df)
+                            pipeline_state["last_updated"] = datetime.now()
+                            pipeline_state["status"] = "collecting"
+
+                            if windows_df_partial is not None and not windows_df_partial.empty:
+                                pipeline_state["windows_df"] = windows_df_partial.copy()
+                                pipeline_state["windows_generated"] = len(windows_df_partial)
                                 pipeline_state["failure_count"] = failure_count
                                 pipeline_state["normal_count"] = normal_count
-                                pipeline_state["status"] = "collecting"
 
-                            print(
-                                f"  [PIPELINE] {len(raw_snapshot_df)} rows | "
-                                f"{len(windows_df_partial)} windows | "
-                                f"{failure_count} FAILURE | {normal_count} NORMAL"
-                            )
+                        print(
+                            f"  [PIPELINE] {len(raw_snapshot_df)} rows | "
+                            f"{len(windows_df_partial) if windows_df_partial is not None else 0} windows | "
+                            f"{failure_count} FAILURE | {normal_count} NORMAL"
+                        )
                 except Exception as proc_exc:
+                    import traceback
                     print(f"  [WARN] Periodic pipeline processing failed: {proc_exc}")
+                    traceback.print_exc()
                     with pipeline_state_lock:
                         pipeline_state["status"] = "collecting"
                         pipeline_state["last_updated"] = datetime.now()
                 finally:
-                    next_process_time += PROCESS_INTERVAL_SEC
+                    next_process_time = time.monotonic() + PROCESS_INTERVAL_SEC
 
             time.sleep(0.5)
     except KeyboardInterrupt:
@@ -581,20 +934,22 @@ def stage1_collect_azure_sidecar(duration_minutes: int = 10) -> pd.DataFrame:
         t.join(timeout=INTERVAL_SEC + 2)
 
     # Build DataFrame
+    raw_cols = [
+        "timestamp", "service_name", "stack", "log_level", "log_message",
+        "ram_percent", "cpu_percent", "heap_mb_used", "heap_max", "gc_count",
+        # Change 2: optional extra metrics
+        "rss_mb", "heap_max_mb", "post_gc_heap_mb", "gc_pause_ms_total",
+        "container_mem_usage_mb", "container_mem_limit_mb",
+        "oom_kill_count", "restart_count", "requests_per_sec", "latency_p95_ms",
+        "ground_truth_label", "failure_type",
+    ]
     if not results_list:
         print("\n  [WARN] No data collected — returning empty DataFrame.")
-        df = pd.DataFrame(columns=[
-            "timestamp", "service_name", "stack", "log_level", "log_message",
-            "ram_percent", "cpu_percent", "heap_mb_used", "gc_count",
-            "ground_truth_label", "failure_type",
-        ])
+        df = pd.DataFrame(columns=raw_cols)
     else:
         df = pd.DataFrame(results_list)
-        df = df[[
-            "timestamp", "service_name", "stack", "log_level", "log_message",
-            "ram_percent", "cpu_percent", "heap_mb_used", "gc_count",
-            "ground_truth_label", "failure_type",
-        ]]
+        available_cols = [c for c in raw_cols if c in df.columns]
+        df = df[available_cols]
         df.sort_values("timestamp", inplace=True)
         df.reset_index(drop=True, inplace=True)
 
@@ -648,10 +1003,10 @@ def stage1_5_preprocess(df):
         nulls_after_fill = int(cleaned[numeric_cols].isna().sum().sum())
         nulls_filled = nulls_before_fill - nulls_after_fill
 
-        # 3) Remove rows where log_message is null/empty
+        # 3) Change 3: rows with empty log_message are allowed (real sidecar may omit it).
+        # Keep the row but ensure log_message is an empty string (not NaN) for Drain3.
         log_series = cleaned["log_message"]
-        invalid_log_mask = log_series.isna() | log_series.astype(str).str.strip().eq("")
-        cleaned = cleaned.loc[~invalid_log_mask].reset_index(drop=True)
+        cleaned["log_message"] = log_series.fillna("").astype(str).str.strip()
 
         # 4) Clip numeric outliers
         clip_specs = {
@@ -719,11 +1074,19 @@ def stage2_drain3_parsing(df, config):
         templates   = []
         cluster_ids = []
 
+        _EMPTY_LOG_TMPL = "<no_log>"
+        _EMPTY_CLUSTER  = 0
+
         print(f"  Processing {len(df):,} log messages …")
         for i, msg in enumerate(df["log_message"].astype(str), 1):
-            result = miner.add_log_message(msg)
-            templates.append(result["template_mined"])
-            cluster_ids.append(result["cluster_id"])
+            # Change 3: skip Drain3 parsing for rows with no real log message
+            if not msg.strip():
+                templates.append(_EMPTY_LOG_TMPL)
+                cluster_ids.append(_EMPTY_CLUSTER)
+            else:
+                result = miner.add_log_message(msg)
+                templates.append(result["template_mined"])
+                cluster_ids.append(result["cluster_id"])
             if i % 2000 == 0:
                 print(f"    … {i:,} / {len(df):,} processed")
 
@@ -773,24 +1136,25 @@ def stage2_drain3_parsing(df, config):
 # STAGE 3 — THREE-LAYER HYBRID CLASSIFIER
 # =============================================================================
 def _layer1_keyword(template: str):
-    """Layer 1: keyword matching on the Drain3 template."""
-    upper = template.upper()
-    for kw in MEMORY_KEYWORDS:
-        if kw in upper:
-            return "FAILURE", "keyword", "memory_leak"
-    for kw in CPU_KEYWORDS:
-        if kw in upper:
-            return "FAILURE", "keyword", "cpu_spike"
+    """Layer 1: keyword matching on the Drain3 template using compiled word-boundary regexes."""
+    if not template or not isinstance(template, str):
+        return None, None, None
+    for pattern, failure_type in LAYER1_PATTERNS:
+        if pattern.search(template):
+            return "FAILURE", "keyword", failure_type
     return None, None, None
 
 
 def _build_tfidf(df):
     """
-    Fit TF-IDF on (unique templates + reference corpus).
-    Returns vectorizer, template matrix, reference matrix.
+    Fit TF-IDF on (unique templates + failure and normal reference corpora).
+    Returns vectorizer, template matrix, ref_fail_matrix, ref_norm_matrix, unique_templates.
     """
-    unique_templates = df["log_template"].unique().tolist()
-    all_docs = unique_templates + FAILURE_REFERENCE_CORPUS
+    if "log_template" in df.columns:
+        unique_templates = [str(t) for t in df["log_template"].dropna().unique().tolist()]
+    else:
+        unique_templates = []
+    all_docs = unique_templates + FAILURE_REFERENCE_CORPUS + NORMAL_REFERENCE_CORPUS
 
     vectorizer = TfidfVectorizer(
         ngram_range=(1, 2),
@@ -799,25 +1163,275 @@ def _build_tfidf(df):
     )
     vectorizer.fit(all_docs)
 
-    tmpl_matrix = vectorizer.transform(unique_templates)
-    ref_matrix  = vectorizer.transform(FAILURE_REFERENCE_CORPUS)
+    tmpl_matrix = vectorizer.transform(unique_templates) if unique_templates else None
+    ref_fail_matrix = vectorizer.transform(FAILURE_REFERENCE_CORPUS)
+    ref_norm_matrix = vectorizer.transform(NORMAL_REFERENCE_CORPUS)
 
-    return vectorizer, tmpl_matrix, ref_matrix, unique_templates
+    return vectorizer, tmpl_matrix, ref_fail_matrix, ref_norm_matrix, unique_templates
 
 
-def _layer2_tfidf(template: str, tmpl_lookup: dict, threshold: float):
-    """Layer 2: cosine similarity against failure reference corpus."""
-    vec = tmpl_lookup.get(template)
-    if vec is None:
-        return "NORMAL", "normal"
-    if vec > threshold:
-        return "FAILURE", "tfidf_semantic"
-    return "NORMAL", "normal"
+def _layer2_tfidf(template: str, tmpl_lookup: dict = None, threshold: float = 0.12, margin: float = 0.05):
+    """
+    Layer 2: TF-IDF cosine similarity against failure reference corpus and normal reference corpus.
+    Computes sim_failure and sim_normal and flags FAILURE only if:
+      sim_failure > threshold and (sim_failure - sim_normal) > margin
+    Returns: (label, layer, failure_type)
+    """
+    template_str = str(template) if template is not None else ""
+    if tmpl_lookup is not None and template_str in tmpl_lookup:
+        entry = tmpl_lookup[template_str]
+        if isinstance(entry, dict):
+            sim_failure = entry.get("sim_failure", 0.0)
+            sim_normal = entry.get("sim_normal", 0.0)
+            ftype = entry.get("failure_type", "oom")
+        elif isinstance(entry, (list, tuple)):
+            sim_failure = entry[0]
+            sim_normal = entry[1] if len(entry) > 1 else 0.0
+            ftype = entry[2] if len(entry) > 2 else "oom"
+        else:
+            sim_failure = float(entry)
+            sim_normal = 0.0
+            ftype = "oom"
+    else:
+        # Dynamic / standalone computation
+        all_docs = [template_str] + FAILURE_REFERENCE_CORPUS + NORMAL_REFERENCE_CORPUS
+        v = TfidfVectorizer(ngram_range=(1, 2), max_features=5000, sublinear_tf=True)
+        v.fit(all_docs)
+        t_vec = v.transform([template_str])
+        f_mat = v.transform(FAILURE_REFERENCE_CORPUS)
+        n_mat = v.transform(NORMAL_REFERENCE_CORPUS)
+        sim_f_row = cosine_similarity(t_vec, f_mat)[0]
+        sim_n_row = cosine_similarity(t_vec, n_mat)[0]
+        best_f_idx = int(np.argmax(sim_f_row))
+        sim_failure = float(sim_f_row[best_f_idx])
+        sim_normal = float(np.max(sim_n_row))
+        ftype = FAILURE_REFERENCE_TYPES[best_f_idx]
+
+    if sim_failure > threshold and (sim_failure - sim_normal) > margin:
+        return "FAILURE", "tfidf_semantic", ftype
+    return "NORMAL", "normal", "none"
+
+
+# =============================================================================
+# OPTIONAL SENTENCE-EMBEDDING BACKEND (all-MiniLM-L6-v2)
+# =============================================================================
+_EMBEDDING_MODEL = None
+_EMBEDDING_LOCK = threading.Lock()
+
+def _get_embedding_model(model_name="all-MiniLM-L6-v2"):
+    global _EMBEDDING_MODEL
+    if _EMBEDDING_MODEL is None:
+        with _EMBEDDING_LOCK:
+            if _EMBEDDING_MODEL is None:
+                from sentence_transformers import SentenceTransformer
+                _EMBEDDING_MODEL = SentenceTransformer(model_name)
+    return _EMBEDDING_MODEL
+
+
+def _build_embedding_index(df, model_name="all-MiniLM-L6-v2"):
+    """
+    Precompute sentence embeddings for unique templates and failure/normal reference corpora.
+    Returns tmpl_to_semantic dict mapping template to:
+      {"sim_failure": sim_f, "sim_normal": sim_n, "failure_type": ftype}
+    """
+    model = _get_embedding_model(model_name)
+    if "log_template" in df.columns:
+        unique_templates = [str(t) for t in df["log_template"].dropna().unique().tolist()]
+    else:
+        unique_templates = []
+
+    fail_embeddings = model.encode(FAILURE_REFERENCE_CORPUS, convert_to_numpy=True)
+    norm_embeddings = model.encode(NORMAL_REFERENCE_CORPUS, convert_to_numpy=True)
+
+    fail_norms = np.linalg.norm(fail_embeddings, axis=1, keepdims=True)
+    fail_embeddings = fail_embeddings / np.maximum(fail_norms, 1e-9)
+
+    norm_norms = np.linalg.norm(norm_embeddings, axis=1, keepdims=True)
+    norm_embeddings = norm_embeddings / np.maximum(norm_norms, 1e-9)
+
+    tmpl_to_semantic = {}
+    if unique_templates:
+        tmpl_embeddings = model.encode(unique_templates, convert_to_numpy=True)
+        tmpl_norms = np.linalg.norm(tmpl_embeddings, axis=1, keepdims=True)
+        tmpl_embeddings = tmpl_embeddings / np.maximum(tmpl_norms, 1e-9)
+
+        sim_fail_matrix = np.dot(tmpl_embeddings, fail_embeddings.T)
+        sim_norm_matrix = np.dot(tmpl_embeddings, norm_embeddings.T)
+
+        for i, tmpl in enumerate(unique_templates):
+            sim_f_row = sim_fail_matrix[i]
+            sim_n_row = sim_norm_matrix[i]
+            best_idx = int(np.argmax(sim_f_row))
+            sim_failure = float(sim_f_row[best_idx])
+            sim_normal = float(np.max(sim_n_row))
+            ftype = FAILURE_REFERENCE_TYPES[best_idx]
+            tmpl_to_semantic[tmpl] = {
+                "sim_failure": sim_failure,
+                "sim_normal": sim_normal,
+                "failure_type": ftype,
+            }
+
+    return tmpl_to_semantic, fail_embeddings, norm_embeddings
+
+
+def _layer2_embedding(template: str, tmpl_lookup: dict = None, threshold: float = 0.35, margin: float = 0.05):
+    """
+    Layer 2: sentence-embedding cosine similarity using sentence-transformers (all-MiniLM-L6-v2).
+    Computes sim_failure and sim_normal against the same two corpora.
+    Flags FAILURE only if sim_failure > threshold and (sim_failure - sim_normal) > margin.
+    Returns: (label, layer, failure_type)
+    """
+    template_str = str(template) if template is not None else ""
+    if tmpl_lookup is not None and template_str in tmpl_lookup:
+        entry = tmpl_lookup[template_str]
+        sim_failure = entry["sim_failure"]
+        sim_normal = entry["sim_normal"]
+        ftype = entry["failure_type"]
+    else:
+        model = _get_embedding_model()
+        t_emb = model.encode([template_str], convert_to_numpy=True)
+        t_emb = t_emb / max(float(np.linalg.norm(t_emb)), 1e-9)
+        f_emb = model.encode(FAILURE_REFERENCE_CORPUS, convert_to_numpy=True)
+        f_emb = f_emb / np.maximum(np.linalg.norm(f_emb, axis=1, keepdims=True), 1e-9)
+        n_emb = model.encode(NORMAL_REFERENCE_CORPUS, convert_to_numpy=True)
+        n_emb = n_emb / np.maximum(np.linalg.norm(n_emb, axis=1, keepdims=True), 1e-9)
+
+        sim_f = np.dot(t_emb, f_emb.T)[0]
+        sim_n = np.dot(t_emb, n_emb.T)[0]
+        best_idx = int(np.argmax(sim_f))
+        sim_failure = float(sim_f[best_idx])
+        sim_normal = float(np.max(sim_n))
+        ftype = FAILURE_REFERENCE_TYPES[best_idx]
+
+    if sim_failure > threshold and (sim_failure - sim_normal) > margin:
+        return "FAILURE", "embedding_semantic", ftype
+    return "NORMAL", "normal", "none"
+
+
+def tune_semantic_params(df):
+    """
+    Pick optimal semantic threshold and margin by maximizing F1 against ground_truth_label.
+    Works for both TF-IDF and sentence-transformers embedding backends.
+    Returns (best_threshold, best_margin).
+    """
+    if df is None or df.empty or "ground_truth_label" not in df.columns:
+        print("  [TUNE SEMANTIC PARAMS] Missing ground_truth_label or empty dataframe. Using defaults.")
+        return 0.12, 0.05
+
+    valid_df = df[df["ground_truth_label"].isin(["FAILURE", "NORMAL"])].copy()
+    if valid_df.empty or (valid_df["ground_truth_label"] == "FAILURE").sum() == 0:
+        print("  [TUNE SEMANTIC PARAMS] No valid ground-truth FAILURE rows. Using defaults.")
+        return 0.12, 0.05
+
+    backend = CONFIG.get("semantic_backend", "tfidf")
+    sim_failure_map = {}
+    sim_normal_map = {}
+
+    if backend == "embedding":
+        tmpl_lookup, _, _ = _build_embedding_index(valid_df, CONFIG.get("embedding_model", "all-MiniLM-L6-v2"))
+        for tmpl, info in tmpl_lookup.items():
+            sim_failure_map[tmpl] = info["sim_failure"]
+            sim_normal_map[tmpl] = info["sim_normal"]
+        thresh_grid = [0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50]
+        margin_grid = [0.0, 0.02, 0.05, 0.08, 0.10, 0.15]
+    else:
+        v, t_mat, f_mat, n_mat, ut = _build_tfidf(valid_df)
+        if t_mat is not None and len(ut) > 0:
+            sim_f_mat = cosine_similarity(t_mat, f_mat)
+            sim_n_mat = cosine_similarity(t_mat, n_mat)
+            for i, tmpl in enumerate(ut):
+                sim_failure_map[tmpl] = float(np.max(sim_f_mat[i]))
+                sim_normal_map[tmpl] = float(np.max(sim_n_mat[i]))
+        thresh_grid = [0.05, 0.08, 0.10, 0.12, 0.15, 0.20, 0.25]
+        margin_grid = [0.0, 0.02, 0.05, 0.08, 0.10, 0.15]
+
+    tmpl_series = valid_df["log_template"].astype(str)
+    sim_f_series = tmpl_series.map(sim_failure_map).fillna(0.0).values
+    sim_n_series = tmpl_series.map(sim_normal_map).fillna(0.0).values
+    y_true = (valid_df["ground_truth_label"] == "FAILURE").astype(int).values
+
+    best_f1 = -1.0
+    best_thresh = CONFIG.get("tfidf_threshold", 0.12) if backend != "embedding" else CONFIG.get("embedding_threshold", 0.35)
+    best_margin = CONFIG.get("semantic_margin", 0.05)
+
+    for thresh in thresh_grid:
+        for marg in margin_grid:
+            y_pred = ((sim_f_series > thresh) & ((sim_f_series - sim_n_series) > marg)).astype(int)
+            f1 = f1_score(y_true, y_pred, zero_division=0)
+            if f1 > best_f1:
+                best_f1 = f1
+                best_thresh = thresh
+                best_margin = marg
+
+    print(
+        f"  [TUNE SEMANTIC PARAMS] Backend={backend} | "
+        f"Best threshold={best_thresh:.4f}, Best margin={best_margin:.4f}, Best F1={best_f1:.4f}"
+    )
+
+    class TunedSemanticParams(tuple):
+        def __new__(cls, threshold, margin, f1=0.0):
+            return super().__new__(cls, (threshold, margin))
+        def __init__(self, threshold, margin, f1=0.0):
+            self.threshold = threshold
+            self.margin = margin
+            self.f1 = f1
+            self.best_threshold = threshold
+            self.best_margin = margin
+            self.best_f1 = f1
+
+    return TunedSemanticParams(best_thresh, best_margin, best_f1)
+
+
+# Per-service metric baselines (learned from healthy-period data)
+_service_metric_baselines = {}  # svc -> {ram_mean, ram_std, heap_mean, heap_std, cpu_mean, cpu_std, ram_p95, heap_p95}
+
+
+def _update_service_baselines(df):
+    """Update per-service baselines using healthy-period rows (ground_truth_label == NORMAL).
+    Uses P95 for RAM/heap and mean+3*std as upper bounds.
+    """
+    if df is None or df.empty:
+        return
+    for svc, grp in df.groupby("service_name"):
+        healthy = grp[grp.get("ground_truth_label", pd.Series(["NORMAL"] * len(grp))) == "NORMAL"] if "ground_truth_label" in grp.columns else grp
+        if len(healthy) < 100:
+            # Not enough data — use fixed fallbacks until 100 healthy rows exist
+            _service_metric_baselines[svc] = {
+                "ram_p95": 85.0, "heap_p95": 2500.0,
+                "ram_mean": 50.0, "ram_std": 15.0,
+                "heap_mean": 1000.0, "heap_std": 500.0,
+                "cpu_mean": 30.0, "cpu_std": 10.0,
+                "threshold_ram": 85.0, "threshold_heap": 2500.0,
+            }
+            continue
+
+        ram_p95 = float(healthy["ram_percent"].quantile(0.95)) if "ram_percent" in healthy.columns else 85.0
+        heap_p95 = float(healthy["heap_mb_used"].quantile(0.95)) if "heap_mb_used" in healthy.columns else 2500.0
+        ram_mean = float(healthy["ram_percent"].mean()) if "ram_percent" in healthy.columns else 50.0
+        ram_std = float(healthy["ram_percent"].std()) if "ram_percent" in healthy.columns else 15.0
+        heap_mean = float(healthy["heap_mb_used"].mean()) if "heap_mb_used" in healthy.columns else 1000.0
+        heap_std = float(healthy["heap_mb_used"].std()) if "heap_mb_used" in healthy.columns else 500.0
+        cpu_mean = float(healthy["cpu_percent"].mean()) if "cpu_percent" in healthy.columns else 30.0
+        cpu_std = float(healthy["cpu_percent"].std()) if "cpu_percent" in healthy.columns else 10.0
+
+        _service_metric_baselines[svc] = {
+            "ram_p95": ram_p95,
+            "heap_p95": heap_p95,
+            "ram_mean": ram_mean,
+            "ram_std": ram_std,
+            "heap_mean": heap_mean,
+            "heap_std": heap_std,
+            "cpu_mean": cpu_mean,
+            "cpu_std": cpu_std,
+            "threshold_ram": max(ram_p95, ram_mean + 3 * ram_std),
+            "threshold_heap": max(heap_p95, heap_mean + 3 * heap_std),
+        }
 
 
 def _metric_score(row, service_gc_history: dict):
     """
     Compute metric fusion score for a single row.
+    Uses per-service baselines when available, falls back to fixed thresholds.
     Also updates the rolling gc_count history for the service.
     """
     score = 0
@@ -828,11 +1442,19 @@ def _metric_score(row, service_gc_history: dict):
     gc   = row["gc_count"]
     svc  = row["service_name"]
 
-    if ram  > 75: score += 2
-    if ram  > 60: score += 1
-    if heap > 350: score += 2
-    if heap > 280: score += 1
-    if cpu  > 80:  score += 2
+    # Get per-service thresholds (fallback to fixed values)
+    bl = _service_metric_baselines.get(svc, {})
+    ram_threshold = bl.get("threshold_ram", 85.0)
+    heap_threshold = bl.get("threshold_heap", 2500.0)
+    ram_p95 = bl.get("ram_p95", 85.0)
+    heap_p95 = bl.get("heap_p95", 2500.0)
+
+    if ram  > ram_threshold: score += 2
+    if ram  > ram_p95 * 0.85: score += 1
+    if cpu  > 85: score += 2
+    if cpu  > 70: score += 1
+    if heap > heap_threshold: score += 2
+    if heap > heap_p95 * 0.85: score += 1
 
     # GC spike: check if gc_count increased by > 3 in last 10 rows
     history = service_gc_history.setdefault(svc, [])
@@ -847,6 +1469,35 @@ def _metric_score(row, service_gc_history: dict):
     return score
 
 
+def _compute_confidence(row, mscore, metric_thresh):
+    """
+    Compute confidence score (0 to 1) based on:
+    - How many layers agree (keyword, tfidf, metric)
+    - How far the metric score is above its threshold
+    """
+    layers_agreed = 0
+    layer = str(row.get("detection_layer", ""))
+
+    if "keyword" in layer:
+        layers_agreed += 1
+    if "tfidf" in layer:
+        layers_agreed += 1
+    if "metric" in layer or "fusion" in layer:
+        layers_agreed += 1
+
+    # Base confidence from layer agreement
+    base_conf = layers_agreed / 3.0
+
+    # Boost from metric score distance above threshold
+    if metric_thresh > 0:
+        score_ratio = min(mscore / (metric_thresh * 2), 1.0)
+    else:
+        score_ratio = 0.5
+
+    confidence = 0.6 * base_conf + 0.4 * score_ratio
+    return round(min(max(confidence, 0.0), 1.0), 4)
+
+
 def stage3_hybrid_classifier(df, config):
     """
     Apply three-layer hybrid classifier in sequence.
@@ -857,19 +1508,34 @@ def stage3_hybrid_classifier(df, config):
     print("="*60)
 
     try:
-        threshold = config["tfidf_threshold"]
+        backend = config.get("semantic_backend", "tfidf")
+        threshold = config.get("tfidf_threshold", 0.12)
+        margin = float(config.get("semantic_margin", 0.05))
+        embedding_threshold = config.get("embedding_threshold", 0.35)
         metric_thresh = config["metric_score_threshold"]
 
-        # -- Pre-compute TF-IDF similarities (once for all templates) --
-        print("  Building TF-IDF similarity index …")
-        _, tmpl_matrix, ref_matrix, unique_templates = _build_tfidf(df)
-        sim_matrix = cosine_similarity(tmpl_matrix, ref_matrix)
-        max_sims   = sim_matrix.max(axis=1)  # shape: (n_unique_templates,)
-        tmpl_to_maxsim = {
-            tmpl: max_sims[i]
-            for i, tmpl in enumerate(unique_templates)
-        }
-        print(f"  TF-IDF index built over {len(unique_templates)} unique templates.")
+        # -- Pre-compute semantic similarities for unique templates --
+        if backend == "embedding":
+            print(f"  Building Sentence-Embedding similarity index (model: {config.get('embedding_model', 'all-MiniLM-L6-v2')}) …")
+            tmpl_to_semantic, _, _ = _build_embedding_index(df, config.get("embedding_model", "all-MiniLM-L6-v2"))
+            print(f"  Sentence-Embedding index built over {len(tmpl_to_semantic)} unique templates.")
+        else:
+            print("  Building TF-IDF dual-corpus similarity index …")
+            _, tmpl_matrix, ref_fail_matrix, ref_norm_matrix, unique_templates = _build_tfidf(df)
+            tmpl_to_semantic = {}
+            if tmpl_matrix is not None and len(unique_templates) > 0:
+                sim_fail_mat = cosine_similarity(tmpl_matrix, ref_fail_matrix)
+                sim_norm_mat = cosine_similarity(tmpl_matrix, ref_norm_matrix)
+                for i, tmpl in enumerate(unique_templates):
+                    sim_f_row = sim_fail_mat[i]
+                    sim_n_row = sim_norm_mat[i]
+                    best_idx = int(np.argmax(sim_f_row))
+                    tmpl_to_semantic[tmpl] = {
+                        "sim_failure": float(sim_f_row[best_idx]),
+                        "sim_normal": float(np.max(sim_n_row)),
+                        "failure_type": FAILURE_REFERENCE_TYPES[best_idx],
+                    }
+            print(f"  TF-IDF dual-corpus index built over {len(unique_templates)} unique templates.")
 
         hybrid_labels    = []
         detection_layers = []
@@ -877,17 +1543,37 @@ def stage3_hybrid_classifier(df, config):
         service_gc_hist  = {}
 
         for _, row in df.iterrows():
-            template = str(row["log_template"])
+            template = str(row.get("log_template", "") or "").strip()
+            log_msg = str(row.get("log_message", "") or "").strip() if "log_message" in row else template
+            # Real logs only: skip keyword and semantic classification if no real log message (<no_log> / empty)
+            has_real_log = bool(template and template not in ("<no_log>", "nan", "None") and (log_msg or not ("log_message" in row)))
 
-            # Layer 1
-            label, layer, failure_type = _layer1_keyword(template)
+            label = None
+            layer = None
+            failure_type = None
 
-            # Layer 2 (only if Layer 1 found nothing)
+            if has_real_log:
+                # Layer 1
+                label, layer, failure_type = _layer1_keyword(template)
+
+                # Layer 2 (only if Layer 1 found nothing)
+                if label is None:
+                    if backend == "embedding":
+                        label, layer, semantic_ftype = _layer2_embedding(
+                            template, tmpl_to_semantic, embedding_threshold, margin
+                        )
+                    else:
+                        label, layer, semantic_ftype = _layer2_tfidf(
+                            template, tmpl_to_semantic, threshold, margin
+                        )
+                    if label == "FAILURE":
+                        failure_type = semantic_ftype
+                    else:
+                        failure_type = None
+
             if label is None:
-                label, layer = _layer2_tfidf(
-                    template, tmpl_to_maxsim, threshold
-                )
-                failure_type = None
+                label = "NORMAL"
+                layer = "none"
 
             # Layer 3 — metric fusion
             mscore = _metric_score(row, service_gc_hist)
@@ -901,21 +1587,58 @@ def stage3_hybrid_classifier(df, config):
 
             if label == "NORMAL":
                 failure_type = "none"
-            elif failure_type is None:
-                # Covers semantic detections that are not metric-only.
-                failure_type = "none"
+            elif failure_type is None or failure_type == "none" or not failure_type:
+                # Requirement 4: make sure every FAILURE row has a failure_type that is not "none"
+                if "metric" in str(layer):
+                    failure_type = "metric_only"
+                else:
+                    entry = tmpl_to_semantic.get(template, {})
+                    closest = entry.get("failure_type") if isinstance(entry, dict) else None
+                    failure_type = closest if closest and closest != "none" else "oom"
 
             hybrid_labels.append(label)
             detection_layers.append(layer)
             failure_types.append(failure_type)
 
-        df["hybrid_label"]    = hybrid_labels
-        df["detection_layer"] = detection_layers
-        df["failure_type"]    = failure_types
+        df["raw_hybrid_label"] = hybrid_labels
+        df["detection_layer"]  = detection_layers
+        df["failure_type"]     = failure_types
+
+        # Compute confidence scores
+        confidences = []
+        for idx, row in df.iterrows():
+            mscore = _metric_score(row, service_gc_hist)
+            conf = _compute_confidence(row, mscore, metric_thresh)
+            confidences.append(conf)
+        df["confidence"] = confidences
+
+        # Debounce: a row becomes FAILURE only if previous 6 rows of same service also had raw FAILURE
+        df["hybrid_label"] = "UNKNOWN"
+        for svc, grp in df.groupby("service_name", sort=False):
+            grp = grp.sort_values("timestamp")
+            svc_idx = grp.index
+            raw_labels = grp["raw_hybrid_label"].values
+            debounced = []
+            for i in range(len(raw_labels)):
+                if raw_labels[i] != "FAILURE":
+                    debounced.append(raw_labels[i])
+                else:
+                    # Check previous 6 rows (30 seconds at 5s interval)
+                    start = max(0, i - 6)
+                    prev = raw_labels[start:i]
+                    if len(prev) >= 6 and all(l == "FAILURE" for l in prev):
+                        debounced.append("FAILURE")
+                    else:
+                        debounced.append("NORMAL")  # suppress — not enough consecutive failures
+            df.loc[svc_idx, "hybrid_label"] = debounced
+
 
         # Summary
         print(f"\n  hybrid_label distribution:")
         for lbl, cnt in df["hybrid_label"].value_counts().items():
+            print(f"    {lbl:<10} {cnt:>6}")
+        print(f"\n  raw_hybrid_label distribution:")
+        for lbl, cnt in df["raw_hybrid_label"].value_counts().items():
             print(f"    {lbl:<10} {cnt:>6}")
         print(f"\n  failure_type distribution:")
         for ftype, cnt in df["failure_type"].value_counts().items():
@@ -945,7 +1668,7 @@ def stage4_sliding_window(df, config):
     try:
         window_minutes = config.get("window_minutes", 5)
         lookback_delta = pd.Timedelta(minutes=window_minutes)
-        min_points = 3
+        min_points = int(config.get("min_window_points", 1))
         records = []
         window_id = int(config.get("window_id_start", 1))
         window_row_counts = []
@@ -975,40 +1698,101 @@ def stage4_sliding_window(df, config):
                 if len(window) < min_points:
                     continue
 
-                # -- Novel Feature 1: memory_growth --
-                memory_growth = (
-                    window["ram_percent"].iloc[-1]
-                    - window["ram_percent"].iloc[0]
-                )
+                # ---------- helper: compute stats for an arbitrary past window ----------
+                def _win_stats(past_win, suffix):
+                    """Return dict of feature_name->value for one lookback window."""
+                    stats = {}
+                    n_w = len(past_win)
+                    ram_s = past_win["ram_percent"]
+                    heap_s = past_win["heap_mb_used"]
+                    gc_s  = past_win["gc_count"]
 
-                # -- Novel Feature 2: heap_rate --
-                heap_diffs = window["heap_mb_used"].diff().dropna()
-                heap_rate  = heap_diffs.mean() if len(heap_diffs) > 0 else 0.0
+                    stats[f"ram_mean{suffix}"] = ram_s.mean() if n_w > 0 else float("nan")
+                    stats[f"ram_max{suffix}"]  = ram_s.max()  if n_w > 0 else float("nan")
+                    stats[f"ram_std{suffix}"]  = ram_s.std()  if n_w > 1 else float("nan")
 
-                # -- Novel Feature 3: gc_spike_count --
-                gc_diffs      = window["gc_count"].diff().dropna()
-                gc_spike_count = int((gc_diffs > 0).sum())
+                    # memory_growth = last - first value in window
+                    stats[f"memory_growth{suffix}"] = (
+                        float(ram_s.iloc[-1] - ram_s.iloc[0]) if n_w >= 2 else float("nan")
+                    )
 
-                # -- Statistical Features --
-                ram_mean = window["ram_percent"].mean()
-                ram_max  = window["ram_percent"].max()
-                ram_std  = window["ram_percent"].std()
+                    # heap_rate = mean of per-row heap diffs
+                    h_diffs = heap_s.diff().dropna()
+                    stats[f"heap_rate{suffix}"] = float(h_diffs.mean()) if len(h_diffs) > 0 else 0.0
+
+                    # gc_spike_count = number of ticks where gc_count increased
+                    gc_diffs = gc_s.diff().dropna()
+                    stats[f"gc_spike_count{suffix}"] = int((gc_diffs > 0).sum())
+
+                    # ram_slope: linear regression slope of ram_percent over time
+                    if n_w >= 2:
+                        t_sec = (
+                            past_win["timestamp"] - past_win["timestamp"].iloc[0]
+                        ).dt.total_seconds().values
+                        r_vals = ram_s.values
+                        t_mean = t_sec.mean()
+                        r_mean = r_vals.mean()
+                        denom  = ((t_sec - t_mean) ** 2).sum()
+                        stats[f"ram_slope{suffix}"] = (
+                            float(((t_sec - t_mean) * (r_vals - r_mean)).sum() / denom)
+                            if denom > 0 else 0.0
+                        )
+                    else:
+                        stats[f"ram_slope{suffix}"] = float("nan")
+                    return stats
+                # --------------------------------------------------------------------
+
+                # Multi-scale lookback windows (past rows only, exclude current)
+                def _lookback_win(minutes):
+                    ts_start = current_ts - pd.Timedelta(minutes=minutes)
+                    return grp[
+                        (grp["timestamp"] >= ts_start)
+                        & (grp["timestamp"] < current_ts)
+                    ]
+
+                win_1m  = _lookback_win(1)
+                win_5m  = _lookback_win(5)   # same as primary lookback (window_minutes default=5)
+                win_10m = _lookback_win(10)
+
+                ms_1m  = _win_stats(win_1m,  "_1m")
+                ms_5m  = _win_stats(win_5m,  "_5m")
+                ms_10m = _win_stats(win_10m, "_10m")
+
+                # Legacy primary window (5-min) – keep backward-compat names
+                memory_growth  = ms_5m["memory_growth_5m"] if not np.isnan(ms_5m["memory_growth_5m"]) else 0.0
+                heap_rate      = ms_5m["heap_rate_5m"]
+                gc_spike_count = ms_5m["gc_spike_count_5m"]
+
+                # -- Statistical Features (primary 5-min window) --
+                ram_mean = ms_5m["ram_mean_5m"] if not np.isnan(ms_5m.get("ram_mean_5m", float("nan"))) else window["ram_percent"].mean()
+                ram_max  = ms_5m["ram_max_5m"]  if not np.isnan(ms_5m.get("ram_max_5m",  float("nan"))) else window["ram_percent"].max()
+                ram_std  = ms_5m["ram_std_5m"]  if not np.isnan(ms_5m.get("ram_std_5m",  float("nan"))) else window["ram_percent"].std()
                 cpu_mean = window["cpu_percent"].mean()
                 cpu_max  = window["cpu_percent"].max()
-                heap_max = window["heap_mb_used"].max()
+                if "heap_max" in window.columns and (window["heap_max"] > 0).any():
+                    valid_hmax = window.loc[window["heap_max"] > 0, "heap_max"].iloc[-1]
+                    heap_max = float(valid_hmax)
+                else:
+                    heap_max = float(window["heap_mb_used"].max())
                 window_duration_seconds = (
                     (window["timestamp"].iloc[-1] - window["timestamp"].iloc[0])
                     / pd.Timedelta(seconds=1)
                 )
 
                 # -- Window Label --
-                window_label = (
-                    "FAILURE"
-                    if (window["ground_truth_label"] == "FAILURE").any()
-                    else "NORMAL"
-                )
+                # Use ground truth when known, otherwise fall back to hybrid_label
+                if (window["ground_truth_label"] == "FAILURE").any():
+                    window_label = "FAILURE"
+                elif (window["ground_truth_label"] == "NORMAL").all():
+                    window_label = "NORMAL"
+                else:
+                    window_label = (
+                        "FAILURE"
+                        if (window["hybrid_label"] == "FAILURE").any()
+                        else "NORMAL"
+                    )
 
-                records.append({
+                rec = {
                     "window_id"          : window_id,
                     "timestamp"          : current["timestamp"],
                     "service_name"       : current["service_name"],
@@ -1030,11 +1814,29 @@ def stage4_sliding_window(df, config):
                     "cpu_max"            : cpu_max,
                     "heap_max"           : heap_max,
                     "hybrid_label"       : current["hybrid_label"],
+                    "raw_hybrid_label"   : current.get("raw_hybrid_label", "UNKNOWN"),
                     "ground_truth_label" : current["ground_truth_label"],
                     "label_source"       : "ground_truth",
                     "detection_layer"    : current["detection_layer"],
                     "failure_type"       : current["failure_type"],
-                })
+                    "confidence"         : current.get("confidence"),
+                    # Change 1: multi-scale window features
+                    **ms_1m,
+                    **ms_5m,
+                    **ms_10m,
+                    # Change 2: pass-through optional extra metrics from raw row
+                    "rss_mb"                 : current.get("rss_mb", float("nan")),
+                    "heap_max_mb"            : current.get("heap_max_mb", float("nan")),
+                    "post_gc_heap_mb"        : current.get("post_gc_heap_mb", float("nan")),
+                    "gc_pause_ms_total"      : current.get("gc_pause_ms_total", float("nan")),
+                    "container_mem_usage_mb" : current.get("container_mem_usage_mb", float("nan")),
+                    "container_mem_limit_mb" : current.get("container_mem_limit_mb", float("nan")),
+                    "oom_kill_count"         : current.get("oom_kill_count", float("nan")),
+                    "restart_count"          : current.get("restart_count", float("nan")),
+                    "requests_per_sec"       : current.get("requests_per_sec", float("nan")),
+                    "latency_p95_ms"         : current.get("latency_p95_ms", float("nan")),
+                }
+                records.append(rec)
                 window_row_counts.append(len(window))
                 window_durations.append(float(window_duration_seconds))
                 window_id += 1
@@ -1088,7 +1890,7 @@ def continuous_save(windows_df, config):
     """
     try:
         if windows_df is None or windows_df.empty:
-            return 0
+            return windows_df if windows_df is not None else pd.DataFrame()
 
         os.makedirs(config["output_dir"], exist_ok=True)
         out_pipeline = os.path.join(config["output_dir"], "pipeline_output.csv")
@@ -1102,6 +1904,13 @@ def continuous_save(windows_df, config):
             axis=1,
         )
         windows_df["label"] = windows_df["hybrid_label"]
+
+        if "label_3state" not in windows_df.columns:
+            failure_events = load_failure_events()
+            windows_df = compute_label_3state(windows_df, failure_events)
+
+        windows_df = add_incident_phase_flags(windows_df)
+        windows_df = add_incident_phase_columns(windows_df)
 
         with pipeline_state_lock:
             last_saved_id = int(pipeline_state["last_window_id"])
@@ -1117,8 +1926,9 @@ def continuous_save(windows_df, config):
             "memory_growth", "heap_rate", "gc_spike_count",
             "ram_mean", "ram_max", "ram_std",
             "cpu_mean", "cpu_max", "heap_max",
-            "hybrid_label", "ground_truth_label", "label_source",
-            "detection_layer", "failure_type",
+            "hybrid_label", "raw_hybrid_label", "ground_truth_label", "label_source",
+            "detection_layer", "failure_type", "label_3state", "confidence",
+            "label_phase_1", "label_phase_2",
         ]
         for col in pipeline_cols:
             if col not in new_rows.columns:
@@ -1245,10 +2055,12 @@ def add_incident_phase_flags(df):
     Binary flags for memory-incident severity/stage relative to FAILURE rows.
     Phase 1: early warning (5-7 min before) through critical failure.
     Phase 2: imminent/critical (0-5 min before) and post-failure.
+    Operates on the full history for each service.
+    Uses only causal (current/past) metrics from the same service.
     """
     df = df.copy()
-    df["incident_phase_1"] = 0
-    df["incident_phase_2"] = 0
+    df["label_phase_1"] = 0
+    df["label_phase_2"] = 0
     if df.empty:
         return df
 
@@ -1262,19 +2074,68 @@ def add_incident_phase_flags(df):
             continue
 
         idx = g.index
+        timestamps = g["timestamp"]
         for fail_ts in failure_times:
-            delta = (fail_ts - g["timestamp"]).dt.total_seconds()
+            delta = (fail_ts - timestamps).dt.total_seconds()
             mask_5_to_7 = (delta > 5 * 60) & (delta <= 7 * 60)
             mask_0_to_5 = (delta >= 0) & (delta <= 5 * 60)
             mask_after = delta < 0
 
-            df.loc[idx[mask_5_to_7], "incident_phase_1"] = 1
-            df.loc[idx[mask_0_to_5], "incident_phase_1"] = 1
-            df.loc[idx[mask_0_to_5], "incident_phase_2"] = 1
-            df.loc[idx[mask_after], "incident_phase_1"] = 1
-            df.loc[idx[mask_after], "incident_phase_2"] = 1
+            # Only set flags for rows at or before the failure time (causal)
+            df.loc[idx[mask_5_to_7 & (delta >= 0)], "label_phase_1"] = 1
+            df.loc[idx[mask_0_to_5 & (delta >= 0)], "label_phase_1"] = 1
+            df.loc[idx[mask_0_to_5 & (delta >= 0)], "label_phase_2"] = 1
+            df.loc[idx[mask_after], "label_phase_1"] = 1
+            df.loc[idx[mask_after], "label_phase_2"] = 1
 
     return df
+
+
+def add_incident_phase_columns(df):
+    """
+    Add causal incident-phase columns computed only from current and past rows of the same service.
+    incident_phase_1: memory_change_5min > 5 and ram_percent > 70
+    incident_phase_2: ram_percent > 85 or heap_mb_used / heap_max > 0.9
+    Uses only current and past rows of the same service, never hybrid_label,
+    ground_truth_label, or future timestamps.
+    """
+    df = df.copy()
+    if df.empty:
+        df["incident_phase_1"] = 0
+        df["incident_phase_2"] = 0
+        return df
+
+    if "memory_change_5min" not in df.columns:
+        df = add_memory_change_features(df)
+
+    df["incident_phase_1"] = 0
+    df["incident_phase_2"] = 0
+
+    # incident_phase_1: uses memory_change_5min and ram_percent (current & past metrics)
+    if "memory_change_5min" in df.columns and "ram_percent" in df.columns:
+        mask_early = (df["memory_change_5min"] > 5) & (df["ram_percent"] > 70)
+        df.loc[mask_early, "incident_phase_1"] = 1
+
+    # incident_phase_2: current row metrics only (ram_percent > 85 or heap_mb_used / heap_max > 0.9)
+    if "ram_percent" in df.columns:
+        mask_crit_ram = df["ram_percent"] > 85
+    else:
+        mask_crit_ram = pd.Series(False, index=df.index)
+
+    if "heap_mb_used" in df.columns and "heap_max" in df.columns:
+        denom = df["heap_max"].replace(0, np.nan)
+        mask_crit_heap = (df["heap_mb_used"] / denom) > 0.9
+        mask_crit_heap = mask_crit_heap.fillna(False)
+    else:
+        mask_crit_heap = pd.Series(False, index=df.index)
+
+    df.loc[mask_crit_ram | mask_crit_heap, "incident_phase_2"] = 1
+
+    return df
+
+
+# Backward compatibility alias
+add_risk_phase_columns = add_incident_phase_columns
 
 
 def build_ml_dataframe(windows_df):
@@ -1282,13 +2143,31 @@ def build_ml_dataframe(windows_df):
     enriched = windows_df.copy()
     enriched = add_ram_std_trend(enriched)
     enriched = add_memory_change_features(enriched)
-    enriched = add_incident_phase_flags(enriched)
+    enriched = add_incident_phase_columns(enriched)
+
+    failure_events = load_failure_events()
+    if "label_3state" not in enriched.columns:
+        enriched = compute_label_3state(enriched, failure_events)
+
+    if "confidence" not in enriched.columns:
+        enriched["confidence"] = 0.5
+    else:
+        enriched["confidence"] = enriched["confidence"].fillna(0.5)
 
     enriched["project_id"] = enriched.apply(
         lambda row: get_project_id(row.get("service_name"), row.get("stack")),
         axis=1,
     )
-    enriched["label"] = enriched["hybrid_label"]
+    # Populate ML label from ground truth when known, otherwise hybrid_label
+    if "ground_truth_label" in enriched.columns:
+        enriched["label"] = enriched.apply(
+            lambda row: row["ground_truth_label"] if row["ground_truth_label"] in ("FAILURE", "NORMAL") else row["hybrid_label"],
+            axis=1,
+        )
+    else:
+        enriched["label"] = enriched["hybrid_label"]
+    if "failure_type" not in enriched.columns:
+        enriched["failure_type"] = ""
     enriched["failure_type"] = enriched.apply(
         lambda row: row["failure_type"] if row["label"] == "FAILURE" else "",
         axis=1,
@@ -1296,7 +2175,7 @@ def build_ml_dataframe(windows_df):
 
     for col in FINAL_ML_COLS:
         if col not in enriched.columns:
-            enriched[col] = 0 if col.startswith("incident_phase") else np.nan
+            enriched[col] = np.nan
 
     return enriched[FINAL_ML_COLS]
 
@@ -1429,8 +2308,9 @@ def stage5_export(windows_df, config):
             "memory_growth", "heap_rate", "gc_spike_count",
             "ram_mean", "ram_max", "ram_std",
             "cpu_mean", "cpu_max", "heap_max",
-            "hybrid_label", "ground_truth_label", "label_source",
-            "detection_layer", "failure_type",
+            "hybrid_label", "raw_hybrid_label", "ground_truth_label", "label_source",
+            "detection_layer", "failure_type", "label_3state", "confidence",
+            "label_phase_1", "label_phase_2",
         ]
         final_ml_cols = FINAL_ML_COLS
 
@@ -1447,15 +2327,24 @@ def stage5_export(windows_df, config):
             print("\n  [STAGE 5 COMPLETE - EMPTY DATASET]")
             return pd.DataFrame(columns=pipeline_cols)
 
-        # -- File 1: pipeline_output.csv --
-        windows_df[pipeline_cols].to_csv(out1, index=False)
-        print(f"  pipeline_output.csv   -> {out1}  ({len(windows_df):,} rows)")
-
         windows_df = add_failure_trends(windows_df)
 
         # Ensure project_id and label are in the in-memory dataframe returned
         windows_df["project_id"] = windows_df["stack"].apply(get_project_id)
         windows_df["label"] = windows_df["hybrid_label"]
+
+        # Compute 3-state label driven by ground-truth failure events
+        failure_events = load_failure_events()
+        if "label_3state" not in windows_df.columns:
+            windows_df = compute_label_3state(windows_df, failure_events)
+
+        windows_df = add_incident_phase_flags(windows_df)
+        windows_df = add_incident_phase_columns(windows_df)
+        for col in pipeline_cols:
+            if col not in windows_df.columns:
+                windows_df[col] = np.nan
+        windows_df[pipeline_cols].to_csv(out1, index=False)
+        print(f"  pipeline_output.csv   -> {out1}  ({len(windows_df):,} rows)")
 
         ml_df = build_ml_dataframe(windows_df)
 
@@ -1575,12 +2464,8 @@ def print_evaluation(windows_df, raw_df):
 # =============================================================================
 def run_ablation_study(windows_df):
     """
-    Compare layer-wise and full-hybrid performance on the same windows_df.
-    Experiments:
-      A) Layer 1 only       -> keyword
-      B) Layer 1 + Layer 2  -> keyword OR tfidf
-      C) Layer 3 only       -> metric_fusion
-      D) Full hybrid        -> hybrid_label
+    Compare layer-wise and full-hybrid performance on the same windows_df,
+    including comparison between TF-IDF and Sentence-Embedding semantic backends.
     """
     print("\n" + "="*60)
     print("ABLATION STUDY")
@@ -1589,11 +2474,52 @@ def run_ablation_study(windows_df):
     y_true = (windows_df["ground_truth_label"] == "FAILURE").astype(int)
     det = windows_df["detection_layer"].astype(str)
 
+    # 1) Layer 1 predictions
+    y_l1 = det.str.contains("keyword", na=False).astype(int)
+
+    # 2) Layer 2 (TF-IDF) predictions on windows_df templates
+    try:
+        _, t_mat, f_mat, n_mat, ut = _build_tfidf(windows_df)
+        sim_f = cosine_similarity(t_mat, f_mat) if t_mat is not None else np.zeros((0, len(FAILURE_REFERENCE_CORPUS)))
+        sim_n = cosine_similarity(t_mat, n_mat) if t_mat is not None else np.zeros((0, len(NORMAL_REFERENCE_CORPUS)))
+        thresh_tfidf = CONFIG.get("tfidf_threshold", 0.12)
+        margin = float(CONFIG.get("semantic_margin", 0.05))
+        pred_tfidf_map = {
+            tmpl: (1 if (np.max(sim_f[i]) > thresh_tfidf and (np.max(sim_f[i]) - np.max(sim_n[i])) > margin) else 0)
+            for i, tmpl in enumerate(ut)
+        }
+        y_l2_tfidf = windows_df["log_template"].astype(str).map(pred_tfidf_map).fillna(0).astype(int)
+    except Exception as exc:
+        print(f"  [WARN] TF-IDF ablation evaluation failed: {exc}")
+        y_l2_tfidf = det.str.contains("tfidf", na=False).astype(int)
+
+    # 3) Layer 2 (Embedding) predictions on windows_df templates
+    try:
+        emb_lookup, _, _ = _build_embedding_index(windows_df, CONFIG.get("embedding_model", "all-MiniLM-L6-v2"))
+        thresh_emb = CONFIG.get("embedding_threshold", 0.35)
+        margin = float(CONFIG.get("semantic_margin", 0.05))
+        pred_emb_map = {
+            tmpl: (1 if (info["sim_failure"] > thresh_emb and (info["sim_failure"] - info["sim_normal"]) > margin) else 0)
+            for tmpl, info in emb_lookup.items()
+        }
+        y_l2_emb = windows_df["log_template"].astype(str).map(pred_emb_map).fillna(0).astype(int)
+    except Exception as exc:
+        print(f"  [WARN] Embedding ablation evaluation failed: {exc}")
+        y_l2_emb = det.str.contains("embedding", na=False).astype(int)
+
+    y_l1_l2_tfidf = ((y_l1 == 1) | (y_l2_tfidf == 1)).astype(int)
+    y_l1_l2_emb   = ((y_l1 == 1) | (y_l2_emb == 1)).astype(int)
+    y_l3          = det.str.contains("metric_fusion", na=False).astype(int)
+    y_full        = (windows_df["hybrid_label"] == "FAILURE").astype(int)
+
     experiments = [
-        ("Layer 1 only",        det.str.contains("keyword", na=False).astype(int)),
-        ("Layer 1 + 2",         det.str.contains("keyword|tfidf", na=False).astype(int)),
-        ("Layer 3 only",        det.str.contains("metric_fusion", na=False).astype(int)),
-        ("Full Hybrid (Yours)", (windows_df["hybrid_label"] == "FAILURE").astype(int)),
+        ("Layer 1 only",          y_l1),
+        ("Layer 2 (TF-IDF)",      y_l2_tfidf),
+        ("Layer 2 (Embedding)",   y_l2_emb),
+        ("Layer 1 + 2 (TF-IDF)",  y_l1_l2_tfidf),
+        ("Layer 1 + 2 (Embed)",   y_l1_l2_emb),
+        ("Layer 3 only",          y_l3),
+        ("Full Hybrid (Active)",  y_full),
     ]
 
     results = []
@@ -1617,23 +2543,23 @@ def run_ablation_study(windows_df):
         })
 
     # --- Main comparison table (requested format) ---
-    print("+---------------------+-----------+--------+--------+")
-    print("| Method              | Precision | Recall | F1     |")
-    print("+---------------------+-----------+--------+--------+")
+    print("+-------------------------+-----------+--------+--------+")
+    print("| Method                  | Precision | Recall | F1     |")
+    print("+-------------------------+-----------+--------+--------+")
     for row in results:
         print(
-            f"| {row['name']:<19} | "
+            f"| {row['name']:<23} | "
             f"{row['precision']:<9.4f} | "
             f"{row['recall']:<6.4f} | "
             f"{row['f1']:<6.4f} |"
         )
-    print("+---------------------+-----------+--------+--------+")
+    print("+-------------------------+-----------+--------+--------+")
 
     # --- Confusion-count details ---
     print("\n  TP/FP/FN by method:")
     for row in results:
         print(
-            f"    {row['name']:<19} "
+            f"    {row['name']:<23} "
             f"TP={row['tp']:<6} FP={row['fp']:<6} FN={row['fn']:<6}"
         )
 
