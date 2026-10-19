@@ -1,0 +1,152 @@
+{
+  "php-azure": {
+    "service_name": "php-azure",
+    "project_id": "project_5",
+    "cpu_failure_prob": 0.28,
+    "cpu_alarm": false,
+    "memory_prob": 1.0,
+    "memory_alert": true,
+    "memory_pred_label": "FAILURE",
+    "joint_alarm": false,
+    "action_recommended": "TRIGGER_PROACTIVE_POD_RESTART",
+    "warning_message": "WARNING: Service 'php-azure' memory issue detected (prob=100.0%, label=FAILURE). Restart pod proactively.",
+    "rca_narrative": "ELEVATED RISK MONITORED: Service 'php-azure' CPU failure prob=28.0%, Memory prob=100.0%. Primary signal: 'Current CPU Utilization %' (10.0%). Continue monitoring, no immediate action required unless conditions worsen.",
+    "feature_contributions": {
+      "cpu_percent": 10.0,
+      "cpu_velocity": 10.0,
+      "cpu_trend_5min": 10.0,
+      "cpu_trend_10min": 10.0,
+      "in_flight_queue": 10.0,
+      "incoming_rate": 10.0,
+      "processing_rate": 10.0,
+      "queue_growth_rate": 10.0,
+      "queue_pressure_index": 10.0,
+      "overload_flag": 10.0
+    },
+    "shapley_phi_values": {
+      "cpu_percent": 0.0,
+      "cpu_velocity": 0.0,
+      "cpu_trend_5min": 0.0,
+      "cpu_trend_10min": 0.0,
+      "in_flight_queue": 0.0,
+      "incoming_rate": 0.0,
+      "processing_rate": 0.0,
+      "queue_growth_rate": 0.0,
+      "queue_pressure_index": 0.0,
+      "overload_flag": 0.0
+    },
+    "sre_runbook_steps": [
+      "Step 1 [Heap/GC Analysis]: Inspect GC pauses -> kubectl logs deployment/php-azure --tail=100 | grep GC",
+      "Step 2 [Proactive Healing]: Replace pod -> kubectl delete pod -l app=php-azure --grace-period=30"
+    ],
+    "incident_ticket_payload": {
+      "ticket_id": "INC-C4-176435",
+      "service_name": "php-azure",
+      "severity": "WARNING",
+      "impact_radius": "MODERATE (Latency Degradation / Pod Instability)",
+      "cpu_failure_probability": "28.0%",
+      "memory_context_probability": "100.0%",
+      "primary_root_cause": "Current CPU Utilization % (10.0% Shapley Attribution)",
+      "secondary_root_cause": "CPU Velocity (Rate of Change) (10.0% Shapley Attribution)",
+      "top_3_cpu_features_by_importance": [
+        {
+          "Current CPU Utilization %": "10.0%"
+        },
+        {
+          "CPU Velocity (Rate of Change)": "10.0%"
+        },
+        {
+          "5-Minute CPU Trend": "10.0%"
+        }
+      ],
+      "summary": "ELEVATED RISK MONITORED: Service 'php-azure' CPU failure prob=28.0%, Memory prob=100.0%. Primary signal: 'Current CPU Utilization %' (10.0%). Continue monitoring, no immediate action required unless conditions worsen.",
+      "recommended_runbook_steps": [
+        "Step 1 [Heap/GC Analysis]: Inspect GC pauses -> kubectl logs deployment/php-azure --tail=100 | grep GC",
+        "Step 2 [Proactive Healing]: Replace pod -> kubectl delete pod -l app=php-azure --grace-period=30"
+      ]
+    },
+    "mitigation_executed": {
+      "service_name": "php-azure",
+      "mitigation_tier": "TIER_2_ACTIVE",
+      "action_executed": "SUPPRESSED_COOLDOWN_ACTIVE",
+      "status": "COOLDOWN_ACTIVE",
+      "cooldown_remaining_sec": 59,
+      "command_issued": null,
+      "circuit_breaker": "CLOSED (Protecting Pod)",
+      "timestamp": "2026-08-30T13:05:38.313611+00:00"
+    },
+    "latency_ms": 130.0313000101596,
+    "timestamp": "2026-08-30T13:05:38.314611"
+  },
+  "srv-proj_01-backend": {
+    "prediction_timestamp": "2026-08-30T13:03:48.928924+00:00",
+    "source_timestamp": "1788093250.3149865",
+    "incident_id": 0,
+    "service_name": "srv-proj_01-backend",
+    "project_id": "Proj_01",
+    "cpu_failure_prob": 0.28,
+    "cpu_alarm": false,
+    "memory_prob": 0.0,
+    "memory_alert": false,
+    "memory_pred_label": "NORMAL",
+    "joint_alarm": false,
+    "action_recommended": "NO_ACTION",
+    "rca_narrative": "NORMAL OPERATIONAL PARAMETERS: Service 'srv-proj_01-backend' CPU metrics stable. CPU=0.0%, Top contributor 'Current CPU Utilization %' (10.0%) within baseline.",
+    "feature_contributions": {
+      "cpu_percent": 10.0,
+      "cpu_velocity": 10.0,
+      "cpu_trend_5min": 10.0,
+      "cpu_trend_10min": 10.0,
+      "in_flight_queue": 10.0,
+      "incoming_rate": 10.0,
+      "processing_rate": 10.0,
+      "queue_growth_rate": 10.0,
+      "queue_pressure_index": 10.0,
+      "overload_flag": 10.0
+    },
+    "shapley_phi_values": {
+      "cpu_percent": 0.0,
+      "cpu_velocity": 0.0,
+      "cpu_trend_5min": 0.0,
+      "cpu_trend_10min": 0.0,
+      "in_flight_queue": 0.0,
+      "incoming_rate": 0.0,
+      "processing_rate": 0.0,
+      "queue_growth_rate": 0.0,
+      "queue_pressure_index": 0.0,
+      "overload_flag": 0.0
+    },
+    "sre_runbook_steps": [
+      "No action required. CPU and queue metrics are healthy."
+    ],
+    "incident_ticket_payload": {
+      "ticket_id": "INC-C4-029213",
+      "service_name": "srv-proj_01-backend",
+      "severity": "NOMINAL",
+      "impact_radius": "NONE (Metrics within SLA)",
+      "cpu_failure_probability": "28.0%",
+      "memory_context_probability": "0.0%",
+      "primary_root_cause": "Current CPU Utilization % (10.0% Shapley Attribution)",
+      "secondary_root_cause": "CPU Velocity (Rate of Change) (10.0% Shapley Attribution)",
+      "top_3_cpu_features_by_importance": [
+        {
+          "Current CPU Utilization %": "10.0%"
+        },
+        {
+          "CPU Velocity (Rate of Change)": "10.0%"
+        },
+        {
+          "5-Minute CPU Trend": "10.0%"
+        }
+      ],
+      "summary": "NORMAL OPERATIONAL PARAMETERS: Service 'srv-proj_01-backend' CPU metrics stable. CPU=0.0%, Top contributor 'Current CPU Utilization %' (10.0%) within baseline.",
+      "recommended_runbook_steps": [
+        "No action required. CPU and queue metrics are healthy."
+      ]
+    },
+    "cpu_pct_raw": 0.0,
+    "cpu_trend_raw": 0.0,
+    "mem_leak_raw": 0.0,
+    "state_machine": "NORMAL"
+  }
+}
