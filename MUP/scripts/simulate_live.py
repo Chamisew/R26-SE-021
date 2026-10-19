@@ -1,5 +1,6 @@
 """
 Component 3 -- Live Feed Simulator
+
 Replays ml_ready_dataset.csv row-by-row into live_feed.csv to simulate
 real-time data from Component 1, calculates live memory predictions using
 the trained Random Forest model, and sends predictions to Component 4 API.
