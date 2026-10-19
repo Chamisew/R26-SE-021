@@ -9,6 +9,8 @@ Validates:
   5. Missing base columns default to zero without raising errors.
 """
 
+
+
 import sys
 import os
 import unittest
@@ -96,7 +98,7 @@ class TestComputeDerivedFeatures(unittest.TestCase):
         expected = 0.04 * (50.0 / 100.0)
         self.assertAlmostEqual(result["ram_leak_momentum"].iloc[0], expected, places=6)
 
-
+# class TestComputeDerivedFeatures(unittest.TestCase):
 class TestSafetyGuards(unittest.TestCase):
     """Test edge cases and safety mechanisms."""
 
